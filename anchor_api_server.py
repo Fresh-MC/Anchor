@@ -279,7 +279,8 @@ if FLASK_AVAILABLE:
         })
 
 
-def run_server(host: str = "0.0.0.0", port: int = 5000, debug: bool = False):
+# Change this line in anchor_api_server.py
+def run_server(host: str = "0.0.0.0", port: int = 8080, debug: bool = False):
     """
     Run ANCHOR API server.
     
