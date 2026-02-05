@@ -12,7 +12,7 @@ requests>=2.31.0             # For Ollama API calls
 
 # Optional: API Server
 flask>=3.0.0                   # HTTP API server
-
+python-dotenv>=0.20.0              # For environment variable management
 # =======================================
 # NOTES:
 # =======================================
