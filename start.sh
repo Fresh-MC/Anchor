@@ -1,5 +1,2 @@
-#!/usr/bin/env bash
-
-pip install -r requirements_v2.txt
-pip install -r requirements_api.txt
-python anchor_api_server.py
+#!/bin/sh
+gunicorn -w 2 -b 0.0.0.0:8080 anchor_api_server:app
