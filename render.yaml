@@ -1,0 +1,9 @@
+ services:
+  - type: web
+    name: anchor-honeypot
+    runtime: python
+    buildCommand: ""
+    startCommand: bash start.sh
+    envVars:
+      - key: ANCHOR_API_KEY
+        value: anchor-secret
