@@ -301,7 +301,7 @@ def run_server(host: str = "0.0.0.0", port: int = 8080, debug: bool = False):
 if __name__ == "__main__":
     import sys
     
-    port = 5000
+    port = 8080
     if len(sys.argv) > 1:
         try:
             port = int(sys.argv[1])
