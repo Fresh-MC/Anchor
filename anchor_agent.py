@@ -45,6 +45,22 @@ from llm_v2 import TemplateBasedLLM, create_llm
 from extractor import ArtifactExtractor, create_extractor
 from memory import ConversationMemory, create_memory, get_memory_manager
 
+# Survival responses: deterministic, in-character, never silent
+_AGENT_SURVIVAL_RESPONSES = [
+    "Hello? Is someone there? The line is very bad.",
+    "I'm sorry, I couldn't hear that. Can you say it again?",
+    "One moment dear, I need to adjust my hearing aid.",
+    "Hmm, the phone is making strange noises. Are you still there?",
+    "I think we got disconnected for a second. What were you saying?",
+]
+_agent_survival_idx = 0
+
+def _get_agent_survival() -> str:
+    global _agent_survival_idx
+    r = _AGENT_SURVIVAL_RESPONSES[_agent_survival_idx % len(_AGENT_SURVIVAL_RESPONSES)]
+    _agent_survival_idx += 1
+    return r
+
 
 class AnchorAgent:
     """
@@ -190,6 +206,10 @@ class AnchorAgent:
         # ═══════════════════════════════════════════════════════════════════
         processing_time_ms = (time.time() - start_time) * 1000
         
+        # Ensure response is NEVER empty (survival guarantee)
+        if not response or not response.strip():
+            response = _get_agent_survival()
+        
         output = {
             "response": response,
             "state": state_name,
@@ -202,6 +222,8 @@ class AnchorAgent:
                 "jailbreak_blocked": is_jailbreak,
                 "forced_extract": forced_extract,
                 "persona_engine": "deterministic",
+                "behavior_score": analysis.get("behavior_score", 0.0),
+                "behavior_cumulative": analysis.get("behavior_cumulative", 0.0),
             }
         }
         
@@ -230,10 +252,10 @@ class AnchorAgent:
         return None
     
     def _error_response(self, error_message: str) -> Dict[str, Any]:
-        """Generate error response"""
+        """Generate error response with in-character survival reply (NEVER silent)"""
         return {
-            "response": None,
-            "state": "ERROR",
+            "response": _get_agent_survival(),
+            "state": "DEFLECT",
             "extracted_artifacts": {
                 "upi_ids": [],
                 "bank_accounts": [],
@@ -250,6 +272,7 @@ class AnchorAgent:
                 "processing_time_ms": 0,
                 "jailbreak_blocked": False,
                 "forced_extract": False,
+                "survival_mode": True,
             }
         }
     

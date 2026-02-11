@@ -18,11 +18,11 @@ from enum import Enum, auto
 from typing import Optional, List, Dict, Tuple
 from dataclasses import dataclass, field
 import re
-import random
 import time
 
 # Use v2 config
 import config_v2 as config
+from behavior_scorer import BehaviorScorer, create_scorer
 
 
 class AgentState(Enum):
@@ -45,6 +45,9 @@ class ConversationContext:
     state_counts: Dict[AgentState, int] = field(default_factory=dict)
     forced_extract_count: int = 0
     start_time: float = field(default_factory=time.time)
+    # Deterministic counters (replace random)
+    template_index: Dict[str, int] = field(default_factory=dict)
+    default_rotation_index: int = 0
 
 
 class DeterministicStateMachine:
@@ -69,6 +72,7 @@ class DeterministicStateMachine:
     
     def __init__(self):
         self.context = ConversationContext()
+        self.scorer = create_scorer()
         
         # Pre-compile JAILBREAK patterns (HIGHEST PRIORITY - checked first!)
         self._jailbreak_patterns = [
@@ -111,6 +115,7 @@ class DeterministicStateMachine:
     def reset(self):
         """Reset for new conversation"""
         self.context = ConversationContext()
+        self.scorer.reset()
     
     def analyze_and_transition(self, transcript: str) -> Tuple[AgentState, Dict]:
         """
@@ -135,6 +140,9 @@ class DeterministicStateMachine:
             "timestamp": time.time()
         })
         
+        # Score turn via BehaviorScorer (always, before any branch)
+        turn_score = self.scorer.score_turn(transcript)
+        
         text_lower = transcript.lower()
         
         # ═══════════════════════════════════════════════════════════════════
@@ -156,6 +164,8 @@ class DeterministicStateMachine:
                 "money_mention": False,
                 "info_request": False,
                 "threat_level": False,
+                "behavior_score": turn_score.composite,
+                "behavior_cumulative": self.scorer.cumulative_score,
             }
             self._update_context(analysis, AgentState.DEFLECT)
             return AgentState.DEFLECT, analysis
@@ -178,6 +188,8 @@ class DeterministicStateMachine:
                 "money_mention": False,
                 "info_request": False,
                 "threat_level": False,
+                "behavior_score": turn_score.composite,
+                "behavior_cumulative": self.scorer.cumulative_score,
             }
             self._update_context(analysis, AgentState.EXTRACT)
             return AgentState.EXTRACT, analysis
@@ -190,6 +202,8 @@ class DeterministicStateMachine:
         analysis["jailbreak_pattern"] = None
         analysis["forced_extract"] = False
         analysis["matched_pattern"] = None
+        analysis["behavior_score"] = turn_score.composite
+        analysis["behavior_cumulative"] = self.scorer.cumulative_score
         
         # ═══════════════════════════════════════════════════════════════════
         # STEP 3: DETERMINE STATE BY RULES
@@ -245,62 +259,71 @@ class DeterministicStateMachine:
     
     def _determine_state(self, analysis: Dict) -> AgentState:
         """
-        Determine state using deterministic rules.
+        Determine state using deterministic rules + BehaviorScorer.
         
         RULES (in priority order):
         1. Info request -> DEFLECT
-        2. High threat -> STALL
-        3. Money mention -> CLARIFY/CONFUSE
-        4. Default -> Weighted
+        2. BehaviorScorer force-extract -> EXTRACT
+        3. High threat -> STALL
+        4. Money mention -> CLARIFY/CONFUSE
+        5. BehaviorScorer prefer-extract -> EXTRACT
+        6. Question -> EXTRACT
+        7. Default -> Deterministic rotation
         """
         # Rule 1: Sensitive info request -> DEFLECT
         if analysis["info_request"]:
             return AgentState.DEFLECT
         
-        # Rule 2: Threatening -> STALL (waste time)
+        # Rule 2: BehaviorScorer high confidence -> EXTRACT
+        if self.scorer.should_force_extract():
+            return AgentState.EXTRACT
+        
+        # Rule 3: Threatening -> STALL (waste time)
         if analysis["urgency"] >= 6 or analysis["threat_level"]:
             return AgentState.STALL
         
-        # Rule 3: Money -> alternate CLARIFY/CONFUSE
+        # Rule 4: Money -> alternate CLARIFY/CONFUSE
         if analysis["money_mention"]:
             if self.context.last_state == AgentState.CLARIFY:
                 return AgentState.CONFUSE
             return AgentState.CLARIFY
         
-        # Rule 4: Question -> maybe EXTRACT
+        # Rule 5: BehaviorScorer medium confidence -> EXTRACT
+        if self.scorer.prefer_extract():
+            return AgentState.EXTRACT
+        
+        # Rule 6: Question -> maybe EXTRACT
         if analysis["is_question"]:
             if self.context.state_counts.get(AgentState.EXTRACT, 0) < 3:
                 return AgentState.EXTRACT
         
-        # Default: weighted selection
+        # Default: deterministic rotation (NO randomness)
         return self._select_default_state()
     
     def _select_default_state(self) -> AgentState:
-        """Weighted random selection avoiding repetition"""
-        weights = {
-            AgentState.CLARIFY: 1.0,
-            AgentState.CONFUSE: 1.0,
-            AgentState.STALL: 0.8,
-            AgentState.EXTRACT: 0.5,
-            AgentState.DEFLECT: 0.8,
-        }
+        """
+        Deterministic rotation avoiding repetition.
+        Cycles through [CLARIFY, CONFUSE, STALL, DEFLECT, EXTRACT]
+        skipping the last-used state for variety.
+        """
+        rotation = [
+            AgentState.CLARIFY,
+            AgentState.CONFUSE,
+            AgentState.STALL,
+            AgentState.DEFLECT,
+            AgentState.EXTRACT,
+        ]
+        idx = self.context.default_rotation_index % len(rotation)
+        candidate = rotation[idx]
+        self.context.default_rotation_index += 1
         
-        # Reduce last state weight
-        if self.context.last_state:
-            weights[self.context.last_state] *= 0.3
+        # Skip last state to avoid repetition
+        if candidate == self.context.last_state:
+            idx = self.context.default_rotation_index % len(rotation)
+            candidate = rotation[idx]
+            self.context.default_rotation_index += 1
         
-        # Weighted selection
-        states = list(weights.keys())
-        total = sum(weights.values())
-        r = random.random() * total
-        
-        cumsum = 0
-        for state in states:
-            cumsum += weights[state]
-            if r <= cumsum:
-                return state
-        
-        return AgentState.CLARIFY
+        return candidate
     
     def _update_context(self, analysis: Dict, state: AgentState):
         """Update context"""
@@ -326,18 +349,29 @@ class DeterministicStateMachine:
         SECURITY: If jailbreak detected, use special deflection responses
         that never acknowledge the manipulation attempt.
         
+        DETERMINISTIC: Uses cycling index per state, no randomness.
         LLM only fills blanks in these templates!
         """
         # JAILBREAK: Use special confused-human deflections
         if analysis and analysis.get("jailbreak_attempt"):
-            template = random.choice(config.JAILBREAK_DEFLECTIONS)
+            jb_key = "__jailbreak__"
+            idx = self.context.template_index.get(jb_key, 0)
+            deflections = config.JAILBREAK_DEFLECTIONS
+            template = deflections[idx % len(deflections)]
+            self.context.template_index[jb_key] = idx + 1
             fills = {}  # No blanks to fill - direct response
             return template, fills
         
         templates = config.STATE_TEMPLATES.get(state.name, ["I'm sorry, what?"])
-        template = random.choice(templates)
+        idx = self.context.template_index.get(state.name, 0)
+        template = templates[idx % len(templates)]
+        self.context.template_index[state.name] = idx + 1
         
-        fills = {k: random.choice(v) for k, v in config.TEMPLATE_FILLS.items()}
+        # Deterministic fill selection: cycle by total turn count
+        turn_num = len(self.context.turns)
+        fills = {}
+        for k, v in config.TEMPLATE_FILLS.items():
+            fills[k] = v[turn_num % len(v)]
         return template, fills
     
     def get_conversation_summary(self, max_turns: int = 4) -> str:

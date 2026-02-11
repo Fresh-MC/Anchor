@@ -19,7 +19,6 @@ Latency target: <100ms to first token
 """
 
 import re
-import random
 import threading
 import queue
 import time
@@ -215,7 +214,9 @@ Reply with ONLY the word/phrase (1-3 words max):"""
             elif self.backend == "ollama":
                 result = self._generate_ollama(prompt, 10)
             else:
-                result = random.choice(config.TEMPLATE_FILLS.get(blank_name, ["something"]))
+                options = config.TEMPLATE_FILLS.get(blank_name, ["something"])
+                idx = hash((state.name, blank_name)) % len(options)
+                result = options[idx]
             
             # Extra sanitization - ensure no long outputs
             result = result.split('\n')[0].strip()[:30]

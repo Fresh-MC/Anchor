@@ -51,8 +51,29 @@ except ImportError:
 
 from anchor_agent import AnchorAgent, create_agent
 from extractor import create_extractor
+from osint_enricher import get_enricher as get_osint_enricher
 from dotenv import load_dotenv
 load_dotenv()
+
+# ── SAFE MODE ────────────────────────────────────────────────────────────
+SAFE_MODE = os.getenv("ANCHOR_SAFE_MODE", "0") == "1"
+
+# ── SURVIVAL RESPONSES (deterministic, in-character, never silent) ──────
+SURVIVAL_RESPONSES = [
+    "Hello? Is someone there? The line is very bad.",
+    "I'm sorry, I couldn't hear that. Can you say it again?",
+    "One moment dear, I need to adjust my hearing aid.",
+    "Hmm, the phone is making strange noises. Are you still there?",
+    "I think we got disconnected for a second. What were you saying?",
+]
+_survival_counter = 0
+
+def get_survival_reply() -> str:
+    """Deterministic in-character fallback. NEVER returns empty."""
+    global _survival_counter
+    reply = SURVIVAL_RESPONSES[_survival_counter % len(SURVIVAL_RESPONSES)]
+    _survival_counter += 1
+    return reply
 
 
 # Track sessions: session_id -> intel_count at last callback
@@ -110,11 +131,13 @@ def count_scammer_turns(conversation_history: list) -> int:
 def send_final_callback(session_id: str, agent, scam_detected: bool, suspicious_keywords: list):
     """
     Submit final intelligence to GUVI endpoint.
-    Called when intelligence is extracted and turns >= 8.
+    Called when intelligence is extracted and turns >= 3.
+    In SAFE_MODE, logs but does NOT make the HTTP call.
     """
     try:
         artifacts = agent.memory.get_all_artifacts()
         total_turns = agent.memory.metrics.scammer_turns
+        behavior = agent.state_machine.scorer.get_summary()
         
         intelligence = {
             "bankAccounts": artifacts.get("bank_accounts", []),
@@ -129,15 +152,21 @@ def send_final_callback(session_id: str, agent, scam_detected: bool, suspicious_
             "scamDetected": scam_detected,
             "totalMessagesExchanged": total_turns,
             "extractedIntelligence": intelligence,
+            "behaviorScore": behavior["cumulative_score"],
             "agentNotes": "Autonomous engagement completed. Intelligence extracted via deception."
         }
         
         print(f"\n🔔 CALLBACK TRIGGERED: Session {session_id}")
         print(f"   Turns: {total_turns}")
+        print(f"   Behavior Score: {behavior['cumulative_score']}")
         print(f"   UPI IDs: {len(intelligence['upiIds'])}")
         print(f"   Bank Accounts: {len(intelligence['bankAccounts'])}")
         print(f"   Phishing Links: {len(intelligence['phishingLinks'])}")
         print(f"   Phone Numbers: {len(intelligence['phoneNumbers'])}")
+        
+        if SAFE_MODE:
+            print("   🛡️ SAFE_MODE: callback logged, HTTP skipped")
+            return
         
         response = requests.post(
             GUVI_FINAL_RESULT_URL,
@@ -174,7 +203,8 @@ if FLASK_AVAILABLE:
         return jsonify({
             "status": "healthy",
             "service": "ANCHOR HoneyPot API",
-            "version": "2.1.0-stateless"
+            "version": "2.2.0-deterministic",
+            "safe_mode": SAFE_MODE,
         })
     
     @app.route('/process', methods=['POST'])
@@ -193,7 +223,7 @@ if FLASK_AVAILABLE:
             data = request.get_json()
             
             if not data:
-                return jsonify({"status": "error", "reply": ""}), 200
+                return jsonify({"status": "success", "reply": get_survival_reply()}), 200
             
             # Extract fields from GUVI format
             session_id = data.get("sessionId", "default")
@@ -204,7 +234,7 @@ if FLASK_AVAILABLE:
             message_text = message_obj.get("text", "") if isinstance(message_obj, dict) else ""
             
             if not message_text:
-                return jsonify({"status": "success", "reply": ""})
+                return jsonify({"status": "success", "reply": get_survival_reply()})
             
             # STATELESS: Create fresh agent for this request
             agent = create_agent(session_id)
@@ -219,11 +249,27 @@ if FLASK_AVAILABLE:
             })
             
             # Extract response
-            agent_response = result.get("response", "")
+            agent_response = result.get("response", "") or get_survival_reply()
             
             # ✅ Read cumulative state from memory, not result
             artifacts = agent.memory.get_all_artifacts()
             turns = agent.memory.metrics.scammer_turns
+            
+            # ── OSINT: Fire-and-forget post-extraction enrichment ──
+            # GUARANTEES:
+            #   - Returns in < 0.1ms (daemon thread dispatch only)
+            #   - NEVER blocks the /process response
+            #   - NEVER mutates artifacts dict
+            #   - Fully disabled in SAFE_MODE
+            try:
+                osint_enricher = get_osint_enricher()
+                osint_enricher.enrich_async(
+                    session_id=session_id,
+                    artifacts_dict=artifacts,
+                    skip_holehe=True,  # Holehe is slow — offline/post-incident only
+                )
+            except Exception:
+                pass  # OSINT failure is NEVER visible to the caller
             
             # ── Scam Detection + Keyword Extraction (all scammer messages) ──
             scammer_texts = [
@@ -251,7 +297,7 @@ if FLASK_AVAILABLE:
             has_intel = intel_count > 0
             last_count = _session_last_intel.get(session_id, 0)
             
-            if has_intel and turns >= 8 and intel_count > last_count:
+            if has_intel and turns >= 3 and intel_count > last_count:
                 send_final_callback(session_id, agent, scam_detected, suspicious_keywords)
                 _session_last_intel[session_id] = intel_count
             
@@ -262,8 +308,8 @@ if FLASK_AVAILABLE:
             })
             
         except Exception:
-            # Always return 200 with clean response structure
-            return jsonify({"status": "success", "reply": ""})
+            # SURVIVAL: Never silent – always in-character
+            return jsonify({"status": "success", "reply": get_survival_reply()})
     
     @app.route('/reset', methods=['POST'])
     def reset():
