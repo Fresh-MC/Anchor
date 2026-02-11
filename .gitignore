@@ -1,0 +1,72 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# =========================
+# Virtual Environment
+# =========================
+venv/
+.env/
+.venv/
+
+# =========================
+# Models (VERY IMPORTANT)
+# =========================
+models/
+*.gguf
+*.bin
+*.pt
+*.pth
+*.onnx
+
+# =========================
+# Audio artifacts
+# =========================
+audio/generated/
+*.wav
+*.mp3
+
+# Keep only filler templates
+!audio/fillers/
+audio/fillers/*.wav
+
+# =========================
+# Logs / runtime files
+# =========================
+logs/
+*.log
+*.tmp
+
+# =========================
+# IDE / Editor junk
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# OS junk
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Local configs
+# =========================
+config_local.py
+*.env
+
+# =========================
+# Test outputs
+# =========================
+test_outputs/
