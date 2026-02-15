@@ -109,6 +109,9 @@ class DeterministicStateMachine:
             "suspend", "terminate", "cancel", "fraud", "illegal"
         }
         
+        # Transaction verbs — explicit action words that signal high scammer intent
+        self._transaction_verbs = {"send", "transfer", "pay"}
+        
         # Jailbreak attempt counter
         self.jailbreak_attempts = 0
     
@@ -255,6 +258,7 @@ class DeterministicStateMachine:
             "threat_level": any(kw in text_lower for kw in self._threat_keywords),
             "is_question": "?" in text_lower,
             "word_count": len(text_lower.split()),
+            "transaction_verb": any(kw in text_lower.split() for kw in self._transaction_verbs),
         }
     
     def _determine_state(self, analysis: Dict) -> AgentState:
@@ -265,6 +269,7 @@ class DeterministicStateMachine:
         1. Info request -> DEFLECT
         2. BehaviorScorer force-extract -> EXTRACT
         3. High threat -> STALL
+        3.5. Transaction verb + last_state==CLARIFY + past turn 1 -> CONFUSE
         4. Money mention -> CLARIFY/CONFUSE
         5. BehaviorScorer prefer-extract -> EXTRACT
         6. Question -> EXTRACT
@@ -281,6 +286,24 @@ class DeterministicStateMachine:
         # Rule 3: Threatening -> STALL (waste time)
         if analysis["urgency"] >= 6 or analysis["threat_level"]:
             return AgentState.STALL
+        
+        # ───────────────────────────────────────────────────────────────
+        # Rule 3.5: EARLY ESCALATION on transaction verbs
+        # Rationale: Scammers who use explicit transaction verbs
+        # (send / transfer / pay) signal high intent to extract money.
+        # If the agent is still sitting in CLARIFY after the first turn,
+        # we escalate immediately to CONFUSE to disrupt the scam flow —
+        # without waiting for the aggregate behavior score to cross its
+        # normal thresholds.  This is safe because:
+        #   - last_state == CLARIFY guarantees we are past turn 1
+        #     (last_state is None on the very first turn)
+        #   - analyze_and_transition is only called for scammer messages
+        #   - The rule is deterministic: same input always yields CONFUSE
+        # ───────────────────────────────────────────────────────────────
+        if (analysis.get("transaction_verb")
+                and self.context.last_state == AgentState.CLARIFY
+                and len(self.context.turns) > 1):
+            return AgentState.CONFUSE
         
         # Rule 4: Money -> alternate CLARIFY/CONFUSE
         if analysis["money_mention"]:
