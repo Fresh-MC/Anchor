@@ -423,15 +423,9 @@ if FLASK_AVAILABLE:
             try:
                 observer_payload = {
                     "session_id": session_id,
-                    "timestamp": time.time(),
-                    "turn": turns,
+                    "timestamp": int(time.time() * 1000),  # epoch ms — dashboard expects ms
                     "state": result.get("state", "CLARIFY"),
-                    "behavior": {
-                        "urgency": behavior_scores.get("urgency", 0.0),
-                        "pressure": behavior_scores.get("pressure", 0.0),
-                        "credential": behavior_scores.get("aggregate", 0.0),
-                        "aggregate": behavior_scores.get("aggregate", 0.0),
-                    },
+                    "behavior_score": float(behavior_scores.get("aggregate", 0.0)),
                     "artifacts": dict(artifacts) if artifacts else {},
                     "osint": dict(osint_data) if osint_data else {},
                     "response": agent_response,

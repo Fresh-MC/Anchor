@@ -34,20 +34,19 @@ def init_observer_db():
     conn = _get_db()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS events (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id  TEXT    NOT NULL,
-            timestamp   REAL    NOT NULL,
-            turn        INTEGER NOT NULL,
-            state       TEXT    NOT NULL,
-            behavior    TEXT    NOT NULL,
-            artifacts   TEXT    NOT NULL,
-            osint       TEXT    NOT NULL,
-            response    TEXT    NOT NULL
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT    NOT NULL,
+            timestamp       INTEGER NOT NULL,
+            state           TEXT    NOT NULL DEFAULT 'CLARIFY',
+            behavior_score  REAL    NOT NULL DEFAULT 0.0,
+            artifacts       TEXT    NOT NULL DEFAULT '{}',
+            osint           TEXT    NOT NULL DEFAULT '{}',
+            response        TEXT    NOT NULL DEFAULT ''
         )
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_events_session
-        ON events (session_id, turn)
+        ON events (session_id, timestamp)
     """)
     conn.commit()
     conn.close()
@@ -59,19 +58,28 @@ def store_event(payload: dict) -> None:
     Append an observer event directly to SQLite.
     Called from anchor_api_server in a daemon thread.
     Caller is responsible for exception handling.
+
+    All fields are normalized at write time — never at read time.
     """
+    ts = payload.get("timestamp")
+    if ts is None:
+        ts = int(time.time() * 1000)
+
+    behavior_score = payload.get("behavior_score")
+    if behavior_score is None:
+        behavior_score = 0.0
+
     conn = _get_db()
     conn.execute(
         """
-        INSERT INTO events (session_id, timestamp, turn, state, behavior, artifacts, osint, response)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO events (session_id, timestamp, state, behavior_score, artifacts, osint, response)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             payload.get("session_id", ""),
-            payload.get("timestamp", time.time()),
-            payload.get("turn", 0),
+            int(ts),
             payload.get("state", "CLARIFY"),
-            json.dumps(payload.get("behavior", {})),
+            float(behavior_score),
             json.dumps(payload.get("artifacts", {})),
             json.dumps(payload.get("osint", {})),
             payload.get("response", ""),
@@ -116,19 +124,19 @@ def get_session(session_id: str):
     try:
         conn = _get_db()
         rows = conn.execute(
-            "SELECT * FROM events WHERE session_id = ? ORDER BY turn ASC, id ASC",
+            "SELECT * FROM events WHERE session_id = ? ORDER BY timestamp ASC, id ASC",
             (session_id,),
         ).fetchall()
         conn.close()
 
         events = []
-        for r in rows:
+        for idx, r in enumerate(rows):
             events.append({
                 "session_id": r["session_id"],
                 "timestamp": r["timestamp"],
-                "turn": r["turn"],
+                "turn": idx + 1,
                 "state": r["state"],
-                "behavior": json.loads(r["behavior"]),
+                "behavior_score": r["behavior_score"],
                 "artifacts": json.loads(r["artifacts"]),
                 "osint": json.loads(r["osint"]),
                 "response": r["response"],
