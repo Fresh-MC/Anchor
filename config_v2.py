@@ -294,3 +294,78 @@ STATE_PROMPTS = {
     "EXTRACT": "You want to extract information about their operation. Ask probing questions subtly.",
     "DEFLECT": "You want to change the subject or avoid giving information. Deflect politely.",
 }
+
+# =============================================================================
+# CLARIFY TEMPLATES - Expanded for more context
+# =============================================================================
+STATE_TEMPLATES["CLARIFY"] = [
+    "I'm sorry, could you repeat that? My hearing isn't what it used to be.",
+    "What was that about the {topic}? I didn't quite catch that.",
+    "I'm sorry dear, you'll have to speak up. What did you say about {topic}?",
+    "Pardon? The {topic}? Could you say that again?",
+    "You said something about {bank_name}? I couldn't hear properly, say it again please.",
+    "Wait, how much did you say? {amount} sounds like a lot, can you repeat that slowly?",
+    "I'm sorry, did you say {last_word}? My hearing aid is acting up again.",
+    "Could you spell that out for me? I want to make sure I heard {last_word} correctly.",
+    "You mentioned my {account_type}? Which one, dear? I have so many things I forget."
+]
+
+# =============================================================================
+# CONFUSE TEMPLATES - Expanded for more context
+# =============================================================================
+STATE_TEMPLATES["CONFUSE"] = [
+    "Oh, is this about my {random_topic}? I thought you were calling about that.",
+    "Wait, I already {random_action}. Are you sure you have the right person?",
+    "My {relative} handles all that. Should I get them? They're {excuse}.",
+    "I think you want my neighbor. They're always getting calls about {topic}.",
+    "{bank_name}? I thought I closed that years ago, or was that the other one?",
+    "Wait, is this the same {contact_method} my grandson told me about? He said not to trust those.",
+    "{amount}? That doesn't sound right, I only have my pension coming in on Tuesdays.",
+    "Oh dear, I thought you said {last_word} earlier, now I'm all mixed up.",
+    "My {relative} already sorted the {account_type} last week, are you sure this is still pending?"
+]
+
+# =============================================================================
+# STALL TEMPLATES - Expanded for more context
+# =============================================================================
+STATE_TEMPLATES["STALL"] = [
+    "Hold on, let me find my {item}...",
+    "One moment, someone's at the door...",
+    "Let me get a pen to write this down... now where did I put it...",
+    "Just a second, I need to {action}...",
+    "Oh wait, I need to find the letter from {bank_name}, it's somewhere in this pile...",
+    "Let me sit down first, my knees aren't good, just give me a moment...",
+    "Hold on dear, I need to put on my glasses before I can look at any {account_type} details.",
+    "One minute, the kettle is whistling, I'll be right back...",
+    "I need to check my drawer for the {bank_name} papers, everything is so disorganized..."
+]
+
+# =============================================================================
+# EXTRACT TEMPLATES - Expanded for more context
+# =============================================================================
+STATE_TEMPLATES["EXTRACT"] = [
+    "And where did you say you were calling from?",
+    "What company is this again? I want to write it down.",
+    "Can I have your name and employee ID? For my records.",
+    "What's the phone number I can call you back at?",
+    "Which branch of {bank_name} are you calling from? I want to tell my {relative}.",
+    "You said {amount}, but what exactly is that for? I need to write it all down.",
+    "And this {contact_method} you want me to use, what is the exact address again?",
+    "Before I do anything, what is your full name? My {relative} said I should always ask.",
+    "Can you give me a reference number? I want to check with {bank_name} myself."
+]
+
+# =============================================================================
+# DEFLECT TEMPLATES - Expanded for more context
+# =============================================================================
+STATE_TEMPLATES["DEFLECT"] = [
+    "That reminds me, have I told you about my {topic}?",
+    "Speaking of which, do you know a good {random_thing}?",
+    "Oh my, I just remembered I need to {action}.",
+    "Before we continue, let me tell you about {topic}.",
+    "Oh, {bank_name} reminds me, I need to call them about my {random_topic} too.",
+    "You know, {amount} is what my {relative} was saying about the {random_topic} the other day.",
+    "Wait, before I forget, my {relative} told me something about {urgency_keyword} calls like this.",
+    "Oh dear, the {contact_method} thing reminds me, I still haven't sorted my {random_topic}.",
+    "Speaking of {last_word}, did I ever tell you about the time my {relative} had the same problem?"
+]

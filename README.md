@@ -1,166 +1,128 @@
-# ANCHOR - Real-Time Voice AI Agent 🎙️🛡️
+# ANCHOR - Agentic HoneyPot Engine 🛡️
 
-**A sub-500ms latency voice AI that maintains strict persona boundaries and cannot be jailbroken.**
+**A deterministic JSON-to-JSON deception engine for scammer engagement.**
+
+> **Anchor has no frontend UI. Interaction is via API, tests, or demo tooling only.**
 
 ---
 
-## ⚡ Quick Start (v2 - Refactored)
+## ⚡ Quick Start
 
 ```bash
-# Automated setup
-setup_windows.bat     # Windows
-./setup_linux.sh      # Linux/macOS
+# Install dependencies
+pip install -r requirements_api.txt
 
-# Then run
-python run_anchor.py
+# Run the API server
+python anchor_api_server.py
 ```
 
-**All files now use `config_v2` consistently. No import errors. Ready to run.**
+The server starts on `http://localhost:8080`.
 
 ---
-
-# Original Project Documentation
-
-## Voice AI Agent - Scammer Deterrent
-
-A real-time voice AI agent that talks to scammers over an audio stream, designed for ultra-low latency (<500ms response time).
 
 ## Architecture
 
 ```
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│  Microphone │───▶│  Silero VAD │───▶│  Whisper    │───▶│   State     │
-│   Input     │    │  Detection  │    │  ASR        │    │  Machine    │
-└─────────────┘    └─────────────┘    └─────────────┘    └──────┬──────┘
-                                                                 │
-                                                                 ▼
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│   Speaker   │◀───│  Coqui TTS  │◀───│  Local LLM  │◀───│   Response  │
-│   Output    │    │  Synthesis  │    │  (Phi/Llama)│    │  Generator  │
-└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
+Input JSON (POST /process)
+    │
+    ▼
+┌───────────────────────────────────────────────────────────────┐
+│                     anchor_agent.py                           │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │ 1. Extract message from JSON                            │  │
+│  │ 2. jailbreak_guard() → Block prompt injection           │  │
+│  │ 3. DeterministicStateMachine.analyze_and_transition()   │  │
+│  │ 4. TemplateBasedLLM.generate_response() (NO raw text!)  │  │
+│  │ 5. ArtifactExtractor.extract() → UPI, bank, URLs        │  │
+│  │ 6. ConversationMemory.add_*() → Store history           │  │
+│  │ 7. Return structured JSON                               │  │
+│  └─────────────────────────────────────────────────────────┘  │
+└───────────────────────────────────────────────────────────────┘
+    │
+    ▼
+Output JSON
 ```
 
-## Pipeline Flow
+## API Endpoints
 
-1. **VAD (Voice Activity Detection)** - Silero VAD detects when speech starts/ends
-2. **ASR (Automatic Speech Recognition)** - Whisper.cpp transcribes the audio
-3. **State Machine** - Analyzes transcript and selects behavior state:
-   - `CLARIFY` - Ask scammer to repeat/explain
-   - `CONFUSE` - Act confused, give off-topic responses
-   - `STALL` - Delay with filler words (plays preloaded audio)
-   - `EXTRACT` - Subtly probe for scammer information
-   - `DEFLECT` - Change subject, avoid giving information
-4. **LLM** - Generates short response based on state
-5. **TTS** - Converts response to speech
-6. **Playback** - Plays audio through speakers
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/process` | Process scammer message (GUVI format) |
+| POST | `/reset` | Reset session |
+| GET | `/health` | Health check |
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:8080/process \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: anchor-secret" \
+  -d '{
+    "message": { "text": "Please pay to scammer@ybl" },
+    "session_id": "test_01"
+  }'
+```
 
 ## Project Structure
 
 ```
 Anchor/
-├── main.py           # Main orchestrator
-├── config.py         # Configuration settings
-├── vad.py            # Voice Activity Detection (Silero)
-├── asr.py            # Speech Recognition (Whisper)
-├── state_machine.py  # Behavior state machine
-├── llm.py            # Local LLM for responses
-├── tts.py            # Text-to-Speech (Coqui)
-├── audio_utils.py    # Audio recording/playback
-├── requirements.txt  # Python dependencies
-├── models/           # Model files (download separately)
-│   ├── ggml-base.en.bin
-│   └── phi-2.gguf
-└── audio/
-    └── fillers/      # Preloaded filler audio
-        ├── uhh_wait_beta.wav
-        ├── hmm_let_me_think.wav
-        └── one_moment.wav
+├── anchor_api_server.py   # Flask HTTP API server
+├── anchor_agent.py        # Main API processor
+├── extractor.py           # Regex-based artifact extraction
+├── memory.py              # Conversation history
+├── state_machine_v2.py    # Deterministic state machine
+├── llm_v2.py              # Template-based persona generation
+├── config_v2.py           # Patterns, templates, settings
+├── behavior_scorer.py     # Per-turn behavior scoring
+├── osint_enricher.py      # OSINT artifact enrichment
+├── image_parser.py        # Optional OCR for image scams
+├── requirements_api.txt   # API-mode dependencies
+└── test_*.py              # Test suite
 ```
 
-## Installation
+## Running Modes
 
-### 1. Install Python dependencies
-
+### API Server (Primary)
 ```bash
-pip install -r requirements.txt
+python anchor_api_server.py
 ```
 
-### 2. Download models
-
-**Whisper model:**
+### Demo Mode
 ```bash
-mkdir -p models
-# Download from https://huggingface.co/ggerganov/whisper.cpp
-wget -O models/ggml-base.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+python anchor_agent.py --demo
 ```
 
-**LLM model (Phi-2 or similar):**
+### Interactive Mode
 ```bash
-# Download from https://huggingface.co/TheBloke/phi-2-GGUF
-wget -O models/phi-2.gguf https://huggingface.co/TheBloke/phi-2-GGUF/resolve/main/phi-2.Q4_K_M.gguf
+python anchor_agent.py --interactive
 ```
 
-**Alternative: Use Ollama**
-```bash
-# Install Ollama from https://ollama.ai
-ollama pull phi
+## Security Features
+
+| Rule | Implementation |
+|------|----------------|
+| API key enforcement | `X-API-Key` header required on all POST/GET |
+| LLM never sees raw scammer text | LLM only gets state + template blanks |
+| EXTRACT patterns override all states | `EXTRACT_FORCE_PATTERNS` in config |
+| Jailbreak attempts force DEFLECT | `jailbreak_guard()` checked first |
+| Deterministic execution | No threading, no async, no randomness in security paths |
+
+## Dependencies
+
+**Minimal (API mode):**
+```
+regex>=2023.0.0
+flask>=3.0.0
+python-dotenv>=0.20.0
+requests>=2.31.0
 ```
 
-### 3. Create filler audio files
-
-Place `.wav` files in `audio/fillers/`:
-- `uhh_wait_beta.wav`
-- `hmm_let_me_think.wav`
-- `one_moment.wav`
-
-## Usage
-
-```bash
-python main.py
+**Optional:**
 ```
-
-Press `Ctrl+C` to stop.
-
-## Configuration
-
-Edit `config.py` to customize:
-
-- **Audio settings**: Sample rate, chunk size
-- **VAD settings**: Speech detection thresholds
-- **LLM settings**: Model path, temperature, max tokens
-- **TTS settings**: Voice model selection
-- **Blocked patterns**: Regex patterns to filter from responses
-
-## Safety Features
-
-- **No sensitive data generation**: LLM is blocked from generating phone numbers, OTPs, PINs, SSNs
-- **State machine control**: Behavior is controlled by rules, not the LLM
-- **Response sanitization**: All outputs are filtered through regex patterns
-
-## Performance Optimization
-
-Target: <500ms end-to-end latency
-
-- Use `faster-whisper` with int8 quantization
-- Use small LLM (Phi-2) with Q4 quantization
-- Preload filler audio for instant playback
-- Use streaming where possible
-
-## Troubleshooting
-
-### No audio input detected
-- Check microphone permissions
-- Verify PyAudio installation: `pip install pyaudio`
-- On Linux, install portaudio: `sudo apt install portaudio19-dev`
-
-### High latency
-- Use smaller models (base.en for Whisper)
-- Reduce LLM max_tokens
-- Enable GPU acceleration if available
-
-### TTS not working
-- Install Coqui TTS: `pip install TTS`
-- Fallback to pyttsx3: `pip install pyttsx3`
+pytesseract + Pillow   # Image OCR
+llama-cpp-python       # Enhanced LLM responses
+```
 
 ## License
 

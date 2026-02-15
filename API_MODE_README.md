@@ -4,6 +4,8 @@
 
 ANCHOR has been transformed from a real-time voice AI pipeline into a **pure JSON-to-JSON deception engine** for the Mock Scammer API.
 
+> **Anchor has no frontend UI. Interaction is via API, tests, or demo tooling only.**
+
 ## Architecture
 
 ```
@@ -223,6 +225,63 @@ mock_api.send({
         "artifacts": result["extracted_artifacts"]
     }
 })
+```
+
+## Image-Based Scam Messages (Optional OCR)
+
+ANCHOR supports **optional OCR-based text extraction** from image attachments
+sent by scammers. This is implemented in `image_parser.py`.
+
+### How It Works
+
+1. If `message.image` is present in a `/process` request, the server calls
+   `extract_text_from_image()` which uses **pytesseract + Pillow** to run OCR.
+2. Extracted text is appended to `message.text` with a `[IMAGE_TEXT]:` delimiter.
+3. The combined text feeds into the **existing deterministic pipeline**
+   (extractor → state machine → LLM) with zero architectural changes.
+
+### What This Is NOT
+
+- **NOT computer vision** — no object detection, no scene understanding.
+- **NOT ML inference** — no neural network models, no GPU required.
+- **NOT required** — if pytesseract or Pillow are missing, image parsing is
+  silently skipped and the system behaves exactly as before.
+
+### Safety Guarantees
+
+| Property | Guarantee |
+|----------|-----------|
+| Failure behavior | Returns empty text, no crash, no delay |
+| SAFE_MODE | `ANCHOR_SAFE_MODE=1` disables image parsing entirely |
+| Dependencies | Optional — pytesseract + Pillow only |
+| Blocking | Never blocks `/process` response on failure |
+| Downstream impact | None — extracted text is regular message text |
+
+### Request Format (with image)
+
+```json
+{
+    "sessionId": "abc123",
+    "message": {
+        "text": "Please send money",
+        "image": "<base64-encoded-image-data>",
+        "sender": "scammer",
+        "timestamp": "2026-02-15T10:00:00Z"
+    }
+}
+```
+
+The `image` field accepts: base64 string, file path, or raw bytes.
+If both `text` and `image` are present, extracted image text is appended.
+If only `image` is present (no text), extracted text becomes the full message.
+
+### Install OCR Dependencies (Optional)
+
+```bash
+pip install pytesseract Pillow
+# Also install Tesseract OCR engine:
+# macOS:  brew install tesseract
+# Ubuntu: sudo apt-get install tesseract-ocr
 ```
 
 ## Status: ✅ COMPLETE

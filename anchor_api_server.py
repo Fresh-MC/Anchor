@@ -41,6 +41,8 @@ Response Format:
 
 import logging
 import os
+import time
+import threading
 import requests
 
 try:
@@ -49,14 +51,50 @@ try:
 except ImportError:
     FLASK_AVAILABLE = False
 
+
 from anchor_agent import AnchorAgent, create_agent
 from extractor import create_extractor
 from osint_enricher import get_enricher as get_osint_enricher
+from image_parser import extract_text_from_image
 from dotenv import load_dotenv
 load_dotenv()
 
 # ── SAFE MODE ────────────────────────────────────────────────────────────
 SAFE_MODE = os.getenv("ANCHOR_SAFE_MODE", "0") == "1"
+
+# ── OBSERVER (passive, fire-and-forget) ──────────────────────────────────
+# External observer service URL. Observer writes are dispatched in a daemon
+# thread so they NEVER block the /process response path. Any failure is
+# silently swallowed — the observer is a read-only forensic mirror, not a
+# dependency.
+OBSERVER_URL = os.getenv("OBSERVER_URL", "")  # e.g. http://localhost:9090
+
+
+def write_observer_event(session_id: str, payload: dict) -> None:
+    """
+    Fire-and-forget POST to the observer service.
+    Runs in a daemon thread so it can never block /process.
+    Silently swallows all exceptions — observer is non-critical.
+    Skipped entirely when SAFE_MODE is active or OBSERVER_URL is unset.
+    """
+    # SAFE_MODE: no external writes of any kind
+    if SAFE_MODE:
+        return
+    if not OBSERVER_URL:
+        return
+
+    def _post():
+        try:
+            requests.post(
+                f"{OBSERVER_URL}/observe",
+                json=payload,
+                timeout=0.5,  # hard cap — observer must be fast
+            )
+        except Exception:
+            pass  # observer failure is NEVER visible to Anchor
+
+    # Daemon thread: dies with the process, never blocks /process
+    threading.Thread(target=_post, daemon=True).start()
 
 # ── SURVIVAL RESPONSES (deterministic, in-character, never silent) ──────
 SURVIVAL_RESPONSES = [
@@ -233,6 +271,22 @@ if FLASK_AVAILABLE:
             message_obj = data.get("message", {})
             message_text = message_obj.get("text", "") if isinstance(message_obj, dict) else ""
             
+            # ── Optional image OCR (non-blocking, safe-mode aware) ──
+            # If message.image exists, attempt OCR and append to text.
+            # On ANY failure, proceeds with original text only.
+            if isinstance(message_obj, dict) and message_obj.get("image"):
+                try:
+                    ocr_result = extract_text_from_image(message_obj["image"])
+                    if ocr_result.get("text"):
+                        image_text = ocr_result["text"].strip()
+                        if image_text:
+                            if message_text:
+                                message_text = message_text + " [IMAGE_TEXT]: " + image_text
+                            else:
+                                message_text = "[IMAGE_TEXT]: " + image_text
+                except Exception:
+                    pass  # Image parsing failure is NEVER visible to the caller
+            
             if not message_text:
                 return jsonify({"status": "success", "reply": get_survival_reply()})
             
@@ -301,11 +355,63 @@ if FLASK_AVAILABLE:
                 send_final_callback(session_id, agent, scam_detected, suspicious_keywords)
                 _session_last_intel[session_id] = intel_count
             
-            # Return clean GUVI-compliant response
-            return jsonify({
+            # ── OSINT: poll for results (may still be pending) ────────
+            try:
+                osint_data = osint_enricher.get_results(session_id)
+            except Exception:
+                osint_data = {}
+
+            # ── Behavior scores from state machine scorer ───────────────
+            try:
+                behavior_summary = agent.state_machine.scorer.get_summary()
+                behavior_scores = {
+                    "urgency": behavior_summary.get("latest_score", 0.0),
+                    "pressure": behavior_summary.get("cumulative_score", 0.0),
+                    "aggregate": behavior_summary.get("cumulative_score", 0.0),
+                    "per_turn": behavior_summary.get("per_turn", []),
+                }
+            except Exception:
+                behavior_scores = {"urgency": 0, "pressure": 0, "aggregate": 0, "per_turn": []}
+
+            # ── Build final response (DO NOT modify after this point) ────
+            response_json = {
                 "status": "success",
-                "reply": agent_response
-            })
+                "reply": agent_response,
+                "response": agent_response,
+                "state": result.get("state", "CLARIFY"),
+                "behavior_scores": behavior_scores,
+                "extracted_artifacts": artifacts,
+                "osint_enrichment": osint_data,
+                "turn_index": turns,
+                "session_id": session_id,
+                "metadata": result.get("metadata", {}),
+            }
+
+            # ── OBSERVER: mirror a copy AFTER response is finalized ──────
+            # This runs in a daemon thread and cannot affect the response.
+            # Schema is fixed — dashboard depends on this shape.
+            try:
+                observer_payload = {
+                    "session_id": session_id,
+                    "timestamp": time.time(),
+                    "turn": turns,
+                    "state": result.get("state", "CLARIFY"),
+                    "behavior": {
+                        "urgency": behavior_scores.get("urgency", 0.0),
+                        "pressure": behavior_scores.get("pressure", 0.0),
+                        "credential": behavior_scores.get("aggregate", 0.0),
+                        "aggregate": behavior_scores.get("aggregate", 0.0),
+                    },
+                    "artifacts": dict(artifacts) if artifacts else {},
+                    "osint": dict(osint_data) if osint_data else {},
+                    "response": agent_response,
+                }
+                write_observer_event(session_id, observer_payload)
+            except Exception:
+                pass  # observer must never interfere with /process
+
+            # Return FULL intelligence response (GUVI reply + forensic data)
+            return jsonify(response_json)
             
         except Exception:
             # SURVIVAL: Never silent – always in-character
@@ -330,6 +436,19 @@ if FLASK_AVAILABLE:
         except Exception:
             return jsonify({"status": "success"})
     
+    @app.route('/osint/<session_id>', methods=['GET'])
+    def get_osint(session_id):
+        """Poll OSINT enrichment results for a session (async updates)."""
+        auth_error = require_api_key()
+        if auth_error:
+            return auth_error
+        try:
+            enricher = get_osint_enricher()
+            results = enricher.get_results(session_id)
+            return jsonify({"status": "success", "osint_enrichment": results})
+        except Exception:
+            return jsonify({"status": "success", "osint_enrichment": {}})
+
     @app.route('/sessions', methods=['GET'])
     def list_sessions():
         """List completed sessions"""
