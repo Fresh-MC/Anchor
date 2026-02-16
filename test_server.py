@@ -66,10 +66,16 @@ try:
     
     check("process returns status=success", result.get("status") == "success")
     check("process returns non-empty reply", bool(result.get("reply")))
-    # CRITICAL: response must contain ONLY status + reply
-    extra_keys = set(result.keys()) - {"status", "reply"}
-    check("process returns ONLY {status, reply}", len(extra_keys) == 0,
+    # Response must contain exactly: status, reply, scamDetected, intelligenceFlags
+    expected_keys = {"status", "reply", "scamDetected", "intelligenceFlags"}
+    extra_keys = set(result.keys()) - expected_keys
+    check("process returns correct keys", len(extra_keys) == 0,
           f"unexpected keys: {extra_keys}")
+    check("process has scamDetected (bool)", isinstance(result.get("scamDetected"), bool))
+    flags = result.get("intelligenceFlags", {})
+    check("process has intelligenceFlags (dict)", isinstance(flags, dict))
+    for fk in ["phoneNumber", "bankAccount", "upiId", "phishingLink", "emailAddress"]:
+        check(f"intelligenceFlags.{fk} is bool", isinstance(flags.get(fk), bool))
 except Exception as e:
     failed += 1
     print(f"  FAIL: Process error: {e}", flush=True)
@@ -96,9 +102,13 @@ try:
     
     check("process with artifacts returns status=success", result.get("status") == "success")
     check("process with artifacts returns reply", bool(result.get("reply")))
-    extra_keys = set(result.keys()) - {"status", "reply"}
-    check("process with artifacts ONLY {status, reply}", len(extra_keys) == 0,
-          f"unexpected keys: {extra_keys}")
+    expected_keys = set(result.keys()) - {"status", "reply", "scamDetected", "intelligenceFlags"}
+    check("process with artifacts correct keys", len(expected_keys) == 0,
+          f"unexpected keys: {expected_keys}")
+    check("artifacts scamDetected is true", result.get("scamDetected") == True)
+    flags = result.get("intelligenceFlags", {})
+    check("artifacts upiId flag is true", flags.get("upiId") == True)
+    check("artifacts phoneNumber flag is true", flags.get("phoneNumber") == True)
 except Exception as e:
     failed += 1
     print(f"  FAIL: Process with artifacts error: {e}", flush=True)

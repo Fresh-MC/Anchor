@@ -321,7 +321,7 @@ if FLASK_AVAILABLE:
         Process scammer message — Evaluation-compliant.
 
         Accepts: sessionId, message, conversationHistory
-        Returns ONLY: {"status": "success", "reply": "<honeypot reply>"}
+        Returns: {status, reply, scamDetected, intelligenceFlags}
 
         All intelligence is persisted internally per sessionId.
         No callbacks, no OSINT, no metadata in response.
@@ -387,14 +387,38 @@ if FLASK_AVAILABLE:
 
             _update_session_intel(session_id, artifacts, suspicious_keywords, scam_detected)
 
-            # ── Return ONLY status + reply (evaluation-compliant) ──
+            # ── Build intelligence flags from session store ──
+            with _store_lock:
+                session = _session_store.get(session_id, {})
+                sess_scam = session.get("scam_detected", False)
+                intel_flags = {
+                    "phoneNumber": len(session.get("phone_numbers", [])) > 0,
+                    "bankAccount": len(session.get("bank_accounts", [])) > 0,
+                    "upiId": len(session.get("upi_ids", [])) > 0,
+                    "phishingLink": len(session.get("phishing_links", [])) > 0,
+                    "emailAddress": len(session.get("email_addresses", [])) > 0,
+                }
+
             return jsonify({
                 "status": "success",
                 "reply": agent_response,
+                "scamDetected": sess_scam,
+                "intelligenceFlags": intel_flags,
             })
 
         except Exception:
-            return jsonify({"status": "success", "reply": get_survival_reply()})
+            return jsonify({
+                "status": "success",
+                "reply": get_survival_reply(),
+                "scamDetected": False,
+                "intelligenceFlags": {
+                    "phoneNumber": False,
+                    "bankAccount": False,
+                    "upiId": False,
+                    "phishingLink": False,
+                    "emailAddress": False,
+                },
+            })
 
     @app.route('/export/session/<session_id>', methods=['GET'])
     def export_session(session_id):
