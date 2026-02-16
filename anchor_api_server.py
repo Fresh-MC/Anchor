@@ -269,7 +269,7 @@ if FLASK_AVAILABLE:
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
     logging.getLogger('flask').setLevel(logging.ERROR)
-    
+
     @app.route('/health', methods=['GET'])
     def health():
         """Health check endpoint"""
@@ -280,6 +280,97 @@ if FLASK_AVAILABLE:
             "safe_mode": SAFE_MODE,
         })
     
+    # ═══════════════════════════════════════════════════════════════════════
+    # MOBILE DECEPTION LAYER – /process_mobile
+    # Single-turn, zero-history artifact extraction for mobile clients.
+    # Does NOT touch /process, state machine, LLM, or conversation logic.
+    # ═══════════════════════════════════════════════════════════════════════
+
+    @app.route('/process_mobile', methods=['POST'])
+    def process_mobile():
+        """
+        Mobile Deception Layer endpoint.
+
+        Accepts a single notification payload from an Android device,
+        runs artifact extraction + keyword scan, and returns immediately.
+
+        • No conversation history
+        • No state machine replay
+        • No LLM calls
+        • No turn-count gating
+
+        Request:
+        {
+            "device_id": "string",
+            "app": "com.whatsapp | com.google.android.gm",
+            "title": "string",
+            "text": "string",
+            "timestamp": "ISO8601"
+        }
+
+        Response:
+        {
+            "status": "ok",
+            "suspicious": true|false,
+            "artifacts": { ... },
+            "keywords": [ ... ]
+        }
+        """
+        auth_error = require_api_key()
+        if auth_error:
+            return auth_error
+
+        try:
+            data = request.get_json()
+            if not data:
+                return jsonify({"status": "ok", "suspicious": False, "artifacts": {}, "keywords": []})
+
+            device_id = data.get("device_id", "unknown")
+            app_pkg = data.get("app", "unknown")
+            title = data.get("title", "")
+            text = data.get("text", "")
+            timestamp = data.get("timestamp", "")
+
+            # Combine title + text for maximum extraction coverage
+            combined = f"{title} {text}".strip()
+
+            if not combined:
+                return jsonify({"status": "ok", "suspicious": False, "artifacts": {}, "keywords": []})
+
+            # ── Run artifact extraction (reuses existing extractor, zero changes) ──
+            extractor = create_extractor()
+            artifacts = extractor.extract(combined)
+            keywords = extractor.extract_suspicious_keywords(combined)
+
+            artifact_dict = artifacts.to_dict()
+            suspicious = artifacts.has_artifacts() or len(keywords) > 0
+
+            # ── Demo-visible console log ──
+            print(f"\n📱 MOBILE INTEL [{app_pkg}] device={device_id} ts={timestamp}")
+            print(f"   Title : {title}")
+            print(f"   Text  : {text[:120]}{'…' if len(text) > 120 else ''}")
+            if suspicious:
+                print(f"   🚨 SUSPICIOUS — artifacts found:")
+                for key, vals in artifact_dict.items():
+                    if vals:
+                        print(f"      {key}: {vals}")
+                if keywords:
+                    print(f"      keywords: {keywords}")
+            else:
+                print(f"   ✅ Clean — no IOC detected")
+
+            return jsonify({
+                "status": "ok",
+                "suspicious": suspicious,
+                "artifacts": artifact_dict,
+                "keywords": keywords,
+            })
+
+        except Exception as e:
+            # NEVER crash during demo
+            print(f"   ⚠️ /process_mobile error: {str(e)}")
+            return jsonify({"status": "ok", "suspicious": False, "artifacts": {}, "keywords": []})
+
     @app.route('/process', methods=['POST'])
     def process():
         """
