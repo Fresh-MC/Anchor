@@ -411,10 +411,23 @@ if FLASK_AVAILABLE:
                     "urgency": behavior_summary.get("latest_score", 0.0),
                     "pressure": behavior_summary.get("cumulative_score", 0.0),
                     "aggregate": behavior_summary.get("cumulative_score", 0.0),
+                    "session_behavior_score": behavior_summary.get("session_behavior_score", 0.0),
+                    "escalation_multiplier": behavior_summary.get("escalation_multiplier", 0.0),
+                    "dimensions_fired": behavior_summary.get("dimensions_fired", []),
                     "per_turn": behavior_summary.get("per_turn", []),
                 }
             except Exception:
-                behavior_scores = {"urgency": 0, "pressure": 0, "aggregate": 0, "per_turn": []}
+                behavior_scores = {
+                    "urgency": 0, "pressure": 0, "aggregate": 0,
+                    "session_behavior_score": 0.0, "escalation_multiplier": 0.0,
+                    "dimensions_fired": [], "per_turn": [],
+                }
+
+            # ── OSINT verdict ────────────────────────────────────────────
+            try:
+                osint_verdict = osint_data.get("osint_verdict", "unknown_no_prior_intel") if osint_data else "unknown_no_prior_intel"
+            except Exception:
+                osint_verdict = "unknown_no_prior_intel"
 
             # ── Build final response (DO NOT modify after this point) ────
             response_json = {
@@ -425,6 +438,7 @@ if FLASK_AVAILABLE:
                 "behavior_scores": behavior_scores,
                 "extracted_artifacts": artifacts,
                 "osint_enrichment": osint_data,
+                "osint_verdict": osint_verdict,
                 "turn_index": turns,
                 "session_id": session_id,
                 "metadata": result.get("metadata", {}),
@@ -437,8 +451,12 @@ if FLASK_AVAILABLE:
                 observer_payload = {
                     "session_id": session_id,
                     "timestamp": int(time.time() * 1000),  # epoch ms — dashboard expects ms
+                    "turn_index": turns,
                     "state": result.get("state", "CLARIFY"),
                     "behavior_score": float(behavior_scores.get("aggregate", 0.0)),
+                    "session_behavior_score": float(behavior_scores.get("session_behavior_score", 0.0)),
+                    "escalation_multiplier": float(behavior_scores.get("escalation_multiplier", 0.0)),
+                    "osint_verdict": osint_verdict,
                     "artifacts": dict(artifacts) if artifacts else {},
                     "osint": dict(osint_data) if osint_data else {},
                     "response": agent_response,

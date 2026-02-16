@@ -114,7 +114,72 @@ class OSINTEnrichment:
             "safe_mode": self.safe_mode,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
+            "osint_verdict": derive_osint_verdict(self),
         }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# OSINT VERDICT CLASSIFIER
+# ═════════════════════════════════════════════════════════════════════════════
+
+def derive_osint_verdict(enrichment: "OSINTEnrichment") -> str:
+    """
+    Classify aggregate OSINT results into a single verdict string.
+
+    CLASSIFICATION RULES (evaluated in order — first match wins):
+
+    1. "malicious"
+       ANY VirusTotal result has malicious=True OR suspicious=True
+       OR malicious_vendors > 0.
+
+    2. "clean"
+       At least one VT result returned successfully (no error, not a
+       404 / "URL not in VT database") and NONE were malicious/suspicious.
+
+    3. "unknown_no_prior_intel"
+       VT responded with 404 ("URL not in VT database") or the lookup
+       produced errors/timeouts, OR no OSINT data exists yet.
+       This means the URL has NEVER been scanned — a strong zero-day
+       candidate when combined with a phishing link artifact.
+
+    Returns one of: "malicious" | "clean" | "unknown_no_prior_intel"
+    """
+    # ── Guard: no enrichment data at all ────────────────────────────────
+    if enrichment.status in ("pending", "skipped"):
+        return "unknown_no_prior_intel"
+
+    vt_results = enrichment.virustotal
+
+    # No VT results at all (no phishing links, or VT key not set)
+    if not vt_results:
+        return "unknown_no_prior_intel"
+
+    # ── 1. Check for any malicious signal ───────────────────────────────
+    for vt in vt_results:
+        if vt.get("malicious") is True:
+            return "malicious"
+        if vt.get("suspicious") is True:
+            return "malicious"
+        if (vt.get("malicious_vendors") or 0) > 0:
+            return "malicious"
+
+    # ── 2. Any clean result? (VT responded with data, no error) ─────────
+    has_clean = False
+    for vt in vt_results:
+        err = vt.get("error")
+        if err is None:
+            # VT returned a valid response with no malicious flags
+            has_clean = True
+        elif "not in VT database" in str(err):
+            # 404 — URL never scanned. This is NOT clean, it's unknown.
+            continue
+        # Other errors (timeout, key invalid) → treat as unknown
+
+    if has_clean:
+        return "clean"
+
+    # ── 3. Fallback: no clean data available → unknown ──────────────────
+    return "unknown_no_prior_intel"
 
 
 # ═════════════════════════════════════════════════════════════════════════════

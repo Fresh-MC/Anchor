@@ -34,22 +34,46 @@ def init_observer_db():
     conn = _get_db()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS events (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id      TEXT    NOT NULL,
-            timestamp       INTEGER NOT NULL,
-            state           TEXT    NOT NULL DEFAULT 'CLARIFY',
-            behavior_score  REAL    NOT NULL DEFAULT 0.0,
-            artifacts       TEXT    NOT NULL DEFAULT '{}',
-            osint           TEXT    NOT NULL DEFAULT '{}',
-            response        TEXT    NOT NULL DEFAULT ''
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id              TEXT    NOT NULL,
+            timestamp               INTEGER NOT NULL,
+            turn_index              INTEGER NOT NULL DEFAULT 0,
+            state                   TEXT    NOT NULL DEFAULT 'CLARIFY',
+            behavior_score          REAL    NOT NULL DEFAULT 0.0,
+            session_behavior_score  REAL    NOT NULL DEFAULT 0.0,
+            escalation_multiplier   REAL    NOT NULL DEFAULT 0.0,
+            osint_verdict           TEXT    NOT NULL DEFAULT 'unknown_no_prior_intel',
+            artifacts               TEXT    NOT NULL DEFAULT '{}',
+            osint                   TEXT    NOT NULL DEFAULT '{}',
+            response                TEXT    NOT NULL DEFAULT ''
         )
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_events_session
         ON events (session_id, timestamp)
     """)
+    # ── Auto-migration: add columns that might be missing in older DBs ──
+    _migrate_columns(conn)
     conn.commit()
     conn.close()
+
+
+def _migrate_columns(conn: sqlite3.Connection) -> None:
+    """
+    Safe ALTER TABLE for rolling upgrades.
+    SQLite ignores ADD COLUMN if it already exists (via try/except).
+    """
+    migrations = [
+        ("turn_index",             "INTEGER NOT NULL DEFAULT 0"),
+        ("session_behavior_score", "REAL NOT NULL DEFAULT 0.0"),
+        ("escalation_multiplier",  "REAL NOT NULL DEFAULT 0.0"),
+        ("osint_verdict",          "TEXT NOT NULL DEFAULT 'unknown_no_prior_intel'"),
+    ]
+    for col_name, col_def in migrations:
+        try:
+            conn.execute(f"ALTER TABLE events ADD COLUMN {col_name} {col_def}")
+        except sqlite3.OperationalError:
+            pass  # column already exists — expected on second+ boot
 
 
 # ── Direct in-process write (no HTTP needed) ─────────────────────────────
@@ -72,14 +96,22 @@ def store_event(payload: dict) -> None:
     conn = _get_db()
     conn.execute(
         """
-        INSERT INTO events (session_id, timestamp, state, behavior_score, artifacts, osint, response)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO events (
+            session_id, timestamp, turn_index, state,
+            behavior_score, session_behavior_score, escalation_multiplier,
+            osint_verdict, artifacts, osint, response
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             payload.get("session_id", ""),
             int(ts),
+            int(payload.get("turn_index", 0)),
             payload.get("state", "CLARIFY"),
             float(behavior_score),
+            float(payload.get("session_behavior_score", 0.0)),
+            float(payload.get("escalation_multiplier", 0.0)),
+            payload.get("osint_verdict", "unknown_no_prior_intel"),
             json.dumps(payload.get("artifacts", {})),
             json.dumps(payload.get("osint", {})),
             payload.get("response", ""),
@@ -135,8 +167,12 @@ def get_session(session_id: str):
                 "session_id": r["session_id"],
                 "timestamp": r["timestamp"],
                 "turn": idx + 1,
+                "turn_index": r["turn_index"],
                 "state": r["state"],
                 "behavior_score": r["behavior_score"],
+                "session_behavior_score": r["session_behavior_score"],
+                "escalation_multiplier": r["escalation_multiplier"],
+                "osint_verdict": r["osint_verdict"],
                 "artifacts": json.loads(r["artifacts"]),
                 "osint": json.loads(r["osint"]),
                 "response": r["response"],
