@@ -278,6 +278,54 @@ TEMPLATE_FILLS = {
 }
 
 # =============================================================================
+# BAIT TEMPLATES — Pivot conversation to extract specific missing intel types
+# Used when the agent detects a category of intelligence is still missing.
+# =============================================================================
+BAIT_TEMPLATES = {
+    "phone": [
+        "What's the best number to call you back on, dear?",
+        "Can you give me a phone number? I want my {relative} to call you.",
+        "What number should I ring if I have questions later?",
+        "Wait, what's your direct line? I don't want to call the wrong place.",
+    ],
+    "bank": [
+        "Which bank did you say this was about? I have accounts at several.",
+        "Can you tell me the account number you see? I want to check my records.",
+        "Which branch should I go to? I need the bank name and details.",
+        "What bank account should I be looking at? I have my statements here somewhere.",
+    ],
+    "upi": [
+        "My grandson set up that UPI thing for me. What ID should I send to?",
+        "Oh, can I just pay via that phone pay thing? What's your UPI?",
+        "Is there a UPI address I can use? My {relative} showed me how.",
+        "What's the UPI ID? I use PhonePe, my {relative} set it up for me.",
+    ],
+    "link": [
+        "Do you have a website I can check? I want to make sure this is real.",
+        "Is there a link you can send me? I'll have my {relative} look at it.",
+        "Can you give me the website address? I want to verify with my {relative}.",
+        "Where do I go online to see this? What's the web address?",
+    ],
+}
+
+# =============================================================================
+# SLOW-WALKING STALL TEMPLATES — Extended stalling to waste scammer time
+# These simulate real-time delays: finding glasses, walking slowly, etc.
+# =============================================================================
+SLOW_WALK_TEMPLATES = [
+    "Oh dear, I'm typing very slowly on this phone, bear with me...",
+    "Let me find my reading glasses first, I can't see a thing without them...",
+    "Hold on, I need to move to the other room, the signal is better there...",
+    "I'm walking to my desk, my legs aren't what they used to be...",
+    "Just a moment, I need to sit down, my back is hurting today...",
+    "Can you hold? I need to get my blood pressure medicine first...",
+    "One second, I'm looking for the papers, oh where did I put them...",
+    "Let me call my {relative} on the other phone to help me with this...",
+    "I'm trying to open that app thing on my phone, it's very confusing...",
+    "Hold on, my cat jumped on the table and knocked everything over...",
+]
+
+# =============================================================================
 # SYSTEM PROMPT - Minimal for speed
 # =============================================================================
 SYSTEM_PROMPT = """You are an elderly person on a suspicious call. Be confused, hard of hearing.

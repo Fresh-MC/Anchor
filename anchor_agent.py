@@ -157,6 +157,12 @@ class AnchorAgent:
         is_jailbreak = jailbreak_guard(scammer_message)
         
         # ═══════════════════════════════════════════════════════════════════
+        # STEP 2.5: Compute missing intel and inform state machine
+        # ═══════════════════════════════════════════════════════════════════
+        missing_intel = self._get_missing_intel()
+        self.state_machine.set_missing_intel(missing_intel)
+        
+        # ═══════════════════════════════════════════════════════════════════
         # STEP 3: Run DeterministicStateMachine
         # ═══════════════════════════════════════════════════════════════════
         state, analysis = self.state_machine.analyze_and_transition(scammer_message)
@@ -198,8 +204,9 @@ class AnchorAgent:
             state=state_name,
         )
         
-        # Record in state machine too
+        # Record in state machine too (for history-awareness)
         self.state_machine.add_agent_response(response)
+        self.state_machine.add_used_response(response)
         
         # ═══════════════════════════════════════════════════════════════════
         # STEP 7: Return structured JSON response
@@ -276,6 +283,28 @@ class AnchorAgent:
             }
         }
     
+    def _get_missing_intel(self) -> List[str]:
+        """
+        Determine which intelligence categories are still missing.
+        
+        Checks cumulative artifacts and returns category keys for
+        which no artifacts have been collected yet.
+        
+        Returns:
+            List of missing category keys: 'phone', 'bank', 'upi', 'link'
+        """
+        all_artifacts = self.memory.get_all_artifacts()
+        missing = []
+        if not all_artifacts.get("phone_numbers"):
+            missing.append("phone")
+        if not all_artifacts.get("bank_accounts"):
+            missing.append("bank")
+        if not all_artifacts.get("upi_ids"):
+            missing.append("upi")
+        if not all_artifacts.get("phishing_links"):
+            missing.append("link")
+        return missing
+
     def get_session_summary(self) -> Dict[str, Any]:
         """
         Get session summary with metrics.

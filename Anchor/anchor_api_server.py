@@ -278,20 +278,12 @@ def rebuild_agent_from_history(agent, history):
                 agent.memory.cumulative_artifacts.merge(artifacts)
             agent.memory.metrics.scammer_turns += 1
             try:
-                # Compute missing intel before state transition
-                missing = agent._get_missing_intel()
-                agent.state_machine.set_missing_intel(missing)
-                
-                state, analysis = agent.state_machine.analyze_and_transition(text)
-                # Advance template counter so next call won't repeat
-                agent.state_machine.get_template_for_state(state, analysis)
+                agent.state_machine.analyze_and_transition(text)
             except Exception:
                 pass
         elif sender == "agent":
             try:
                 agent.state_machine.add_agent_response(text)
-                # Track used responses for history-awareness
-                agent.state_machine.add_used_response(text)
             except Exception:
                 pass
 

@@ -50,6 +50,12 @@ class ConversationContext:
     default_rotation_index: int = 0
     # Session-level count of turns that contained a transaction verb
     transaction_verb_count: int = 0
+    # History-awareness: previously used agent responses (avoid repetition)
+    used_responses: List[str] = field(default_factory=list)
+    # Missing intel categories for baiting (e.g., ["phone", "bank", "upi", "link"])
+    missing_intel: List[str] = field(default_factory=list)
+    # Bait template index per category
+    bait_index: Dict[str, int] = field(default_factory=dict)
 
 
 class DeterministicStateMachine:
@@ -121,6 +127,22 @@ class DeterministicStateMachine:
         """Reset for new conversation"""
         self.context = ConversationContext()
         self.scorer.reset()
+    
+    def set_missing_intel(self, categories: List[str]):
+        """
+        Set which intel categories are still missing so the agent can bait for them.
+        
+        Args:
+            categories: List of missing category keys, e.g. ["phone", "bank", "upi", "link"]
+        """
+        self.context.missing_intel = categories
+    
+    def add_used_response(self, response: str):
+        """
+        Record an agent response that was already used in conversation history.
+        The state machine will avoid selecting templates that produce this response.
+        """
+        self.context.used_responses.append(response.strip().lower())
     
     def analyze_and_transition(self, transcript: str) -> Tuple[AgentState, Dict]:
         """
@@ -279,6 +301,7 @@ class DeterministicStateMachine:
         RULES (in priority order):
         1. Info request -> DEFLECT
         2. BehaviorScorer force-extract -> EXTRACT
+        2.5. Missing intel + enough turns + not recently EXTRACT -> EXTRACT (bait)
         3. High threat -> STALL
         3.5. Transaction verb + prior transaction verb in session + turn>=2 -> CONFUSE
         4. Money mention -> CLARIFY/CONFUSE
@@ -293,6 +316,17 @@ class DeterministicStateMachine:
         # Rule 2: BehaviorScorer high confidence -> EXTRACT
         if self.scorer.should_force_extract():
             return AgentState.EXTRACT
+        
+        # Rule 2.5: Missing intel baiting -> EXTRACT every 2nd-3rd turn
+        # If we still have missing intel categories and it's been at least 2 turns,
+        # bias toward EXTRACT to bait for the missing data.
+        if (self.context.missing_intel
+                and len(self.context.turns) >= 3
+                and self.context.last_state != AgentState.EXTRACT):
+            # Every 2 turns, pivot to EXTRACT to bait for missing intel
+            scammer_turns = sum(1 for t in self.context.turns if t["role"] == "scammer")
+            if scammer_turns % 2 == 0:
+                return AgentState.EXTRACT
         
         # Rule 3: Threatening -> STALL (waste time)
         if analysis["urgency"] >= 6 or analysis["threat_level"]:
@@ -393,6 +427,14 @@ class DeterministicStateMachine:
         SECURITY: If jailbreak detected, use special deflection responses
         that never acknowledge the manipulation attempt.
         
+        HISTORY-AWARE: Skips templates that match previously used agent responses.
+        
+        BAIT-AWARE: When in EXTRACT state and missing intel categories exist,
+        selects targeted bait templates to pivot toward that intel type.
+        
+        SLOW-WALKING: Mixes in slow-walk templates for STALL state to waste
+        more scammer time.
+        
         DETERMINISTIC: Uses cycling index per state, no randomness.
         LLM only fills blanks in these templates!
         """
@@ -406,17 +448,81 @@ class DeterministicStateMachine:
             fills = {}  # No blanks to fill - direct response
             return template, fills
         
-        templates = config.STATE_TEMPLATES.get(state.name, ["I'm sorry, what?"])
-        idx = self.context.template_index.get(state.name, 0)
-        template = templates[idx % len(templates)]
-        self.context.template_index[state.name] = idx + 1
-        
         # Deterministic fill selection: cycle by total turn count
         turn_num = len(self.context.turns)
         fills = {}
         for k, v in config.TEMPLATE_FILLS.items():
             fills[k] = v[turn_num % len(v)]
+        
+        # BAIT for missing intel: when in EXTRACT and we have missing categories
+        if state == AgentState.EXTRACT and self.context.missing_intel:
+            bait_templates = getattr(config, 'BAIT_TEMPLATES', {})
+            if bait_templates:
+                # Pick the first missing category that has bait templates
+                for category in self.context.missing_intel:
+                    cat_templates = bait_templates.get(category, [])
+                    if cat_templates:
+                        bait_key = f"__bait_{category}__"
+                        idx = self.context.bait_index.get(category, 0)
+                        template = cat_templates[idx % len(cat_templates)]
+                        self.context.bait_index[category] = idx + 1
+                        # Check if this template was already used
+                        if not self._is_response_used(template, fills):
+                            return template, fills
+                        # Try next template in same category
+                        template = cat_templates[(idx + 1) % len(cat_templates)]
+                        self.context.bait_index[category] = idx + 2
+                        if not self._is_response_used(template, fills):
+                            return template, fills
+                # All bait templates used; fall through to regular EXTRACT templates
+        
+        # SLOW-WALKING: Mix slow-walk templates into STALL state
+        if state == AgentState.STALL:
+            slow_templates = getattr(config, 'SLOW_WALK_TEMPLATES', [])
+            if slow_templates:
+                stall_key = "__slow_walk__"
+                sw_idx = self.context.template_index.get(stall_key, 0)
+                # Alternate: even turns use regular STALL, odd turns use slow-walk
+                if turn_num % 2 == 1:
+                    template = slow_templates[sw_idx % len(slow_templates)]
+                    self.context.template_index[stall_key] = sw_idx + 1
+                    if not self._is_response_used(template, fills):
+                        return template, fills
+        
+        # Regular template selection with history-awareness
+        templates = config.STATE_TEMPLATES.get(state.name, ["I'm sorry, what?"])
+        idx = self.context.template_index.get(state.name, 0)
+        
+        # Try up to len(templates) candidates to avoid repeating used responses
+        for attempt in range(len(templates)):
+            candidate_idx = (idx + attempt) % len(templates)
+            template = templates[candidate_idx]
+            if not self._is_response_used(template, fills):
+                self.context.template_index[state.name] = candidate_idx + 1
+                return template, fills
+        
+        # All templates exhausted; use the next one anyway (cycling)
+        template = templates[idx % len(templates)]
+        self.context.template_index[state.name] = idx + 1
         return template, fills
+    
+    def _is_response_used(self, template: str, fills: Dict[str, str]) -> bool:
+        """
+        Check if a template (after applying fills) matches a previously used response.
+        
+        Returns True if the filled template was already used in conversation history.
+        """
+        if not self.context.used_responses:
+            return False
+        
+        # Apply fills to get the approximate response text
+        filled = template
+        for key, value in fills.items():
+            filled = filled.replace("{" + key + "}", value)
+        filled_lower = filled.strip().lower()
+        
+        # Check against used responses
+        return filled_lower in self.context.used_responses
     
     def get_conversation_summary(self, max_turns: int = 4) -> str:
         """Get recent conversation (minimal for speed)"""
