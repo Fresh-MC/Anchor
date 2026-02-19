@@ -66,11 +66,12 @@ try:
     
     check("process returns status=success", result.get("status") == "success")
     check("process returns non-empty reply", bool(result.get("reply")))
-    # Response must contain exactly: status, reply, scamDetected, intelligenceFlags
-    expected_keys = {"status", "reply", "scamDetected", "intelligenceFlags"}
-    extra_keys = set(result.keys()) - expected_keys
-    check("process returns correct keys", len(extra_keys) == 0,
-          f"unexpected keys: {extra_keys}")
+    # Response must contain: status, reply, scamDetected, intelligenceFlags + evaluation fields
+    required_keys = {"status", "reply", "scamDetected", "intelligenceFlags",
+                     "extractedIntelligence", "engagementMetrics", "agentNotes", "totalMessagesExchanged"}
+    missing_keys = required_keys - set(result.keys())
+    check("process returns all required keys", len(missing_keys) == 0,
+          f"missing keys: {missing_keys}")
     check("process has scamDetected (bool)", isinstance(result.get("scamDetected"), bool))
     flags = result.get("intelligenceFlags", {})
     check("process has intelligenceFlags (dict)", isinstance(flags, dict))
@@ -102,9 +103,8 @@ try:
     
     check("process with artifacts returns status=success", result.get("status") == "success")
     check("process with artifacts returns reply", bool(result.get("reply")))
-    expected_keys = set(result.keys()) - {"status", "reply", "scamDetected", "intelligenceFlags"}
-    check("process with artifacts correct keys", len(expected_keys) == 0,
-          f"unexpected keys: {expected_keys}")
+    check("process with artifacts has extractedIntelligence", isinstance(result.get("extractedIntelligence"), dict))
+    check("process with artifacts has engagementMetrics", isinstance(result.get("engagementMetrics"), dict))
     check("artifacts scamDetected is true", result.get("scamDetected") == True)
     flags = result.get("intelligenceFlags", {})
     check("artifacts upiId flag is true", flags.get("upiId") == True)

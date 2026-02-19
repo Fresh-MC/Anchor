@@ -220,9 +220,16 @@ class ArtifactExtractor:
         
         # UPI patterns (Indian payment system)
         self._upi_patterns = [
-            re.compile(r'\b([a-zA-Z0-9._-]+@[a-zA-Z]{3,})\b'),  # user@bank
-            re.compile(r'\b([a-zA-Z0-9._-]+@(?:paytm|gpay|phonepe|ybl|okaxis|oksbi|okhdfcbank|axl|ibl|upi))\b', re.IGNORECASE),
+            re.compile(r'\b([a-zA-Z0-9._-]+@[a-zA-Z]{2,})\b'),  # user@bank (broad)
+            re.compile(r'\b([a-zA-Z0-9._-]+@(?:paytm|gpay|phonepe|ybl|okaxis|oksbi|okhdfcbank|axl|ibl|upi|apl|fbl|boi|kotak|sbi|icici|hdfcbank|airtel|jio|postbank|unionbank|pnb|bob|canara|idbi|rbl|indus|federal|jupiter|kbl|freecharge|mobikwik|slice|cred|amazonpay|abfspay|waicici|wahdfcbank|wasbi|waaxis))\b', re.IGNORECASE),
         ]
+
+        # Known email domains (excluded from UPI detection)
+        self._email_domains = frozenset({
+            'gmail', 'yahoo', 'outlook', 'hotmail', 'aol', 'icloud', 'protonmail',
+            'mail', 'email', 'msn', 'live', 'tutanota', 'zoho', 'yandex', 'gmx',
+            'rediffmail', 'inbox', 'rocketmail', 'pm', 'fastmail', 'hey',
+        })
         
         # Bank account patterns
         self._bank_patterns = {
@@ -243,8 +250,8 @@ class ArtifactExtractor:
         # Phone number patterns (international)
         self._phone_patterns = [
             re.compile(r'\b(\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})\b'),  # US/Canada
-            re.compile(r'\b(\+91[-.\s]?\d{10})\b'),  # India
-            re.compile(r'\b(\+\d{1,3}[-.\s]?\d{6,14})\b'),  # International
+            re.compile(r'(?<!\w)(\+91[-.\s]?\d{10})(?!\d)'),  # India +91 (fixed: \b fails before +)
+            re.compile(r'(?<!\w)(\+\d{1,3}[-.\s]?\d{6,14})(?!\d)'),  # International (fixed)
             re.compile(r'\b(\d{10})\b'),  # 10-digit (contextual)
         ]
         
@@ -303,23 +310,36 @@ class ArtifactExtractor:
         """
         artifacts = ExtractedArtifacts()
         
-        # Extract UPI IDs
-        artifacts.upi_ids = self._extract_upi(text)
+        # Extract each category independently — failure in one must not block others
+        try:
+            artifacts.upi_ids = self._extract_upi(text)
+        except Exception:
+            artifacts.upi_ids = []
         
-        # Extract bank details
-        artifacts.bank_accounts = self._extract_bank_details(text)
+        try:
+            artifacts.bank_accounts = self._extract_bank_details(text)
+        except Exception:
+            artifacts.bank_accounts = []
         
-        # Extract URLs/links
-        artifacts.phishing_links = self._extract_urls(text)
+        try:
+            artifacts.phishing_links = self._extract_urls(text)
+        except Exception:
+            artifacts.phishing_links = []
         
-        # Extract phone numbers
-        artifacts.phone_numbers = self._extract_phones(text)
+        try:
+            artifacts.phone_numbers = self._extract_phones(text)
+        except Exception:
+            artifacts.phone_numbers = []
         
-        # Extract crypto wallets
-        artifacts.crypto_wallets = self._extract_crypto(text)
+        try:
+            artifacts.crypto_wallets = self._extract_crypto(text)
+        except Exception:
+            artifacts.crypto_wallets = []
         
-        # Extract emails (excluding UPI IDs)
-        artifacts.emails = self._extract_emails(text, exclude=artifacts.upi_ids)
+        try:
+            artifacts.emails = self._extract_emails(text, exclude=artifacts.upi_ids)
+        except Exception:
+            artifacts.emails = []
         
         return artifacts
 
@@ -332,14 +352,19 @@ class ArtifactExtractor:
         return [kw for kw in self._suspicious_keywords if kw in text_lower]
 
     def _extract_upi(self, text: str) -> List[str]:
-        """Extract UPI IDs"""
+        """Extract UPI IDs (excludes known email domains)"""
         upi_ids = set()
         for pattern in self._upi_patterns:
             for match in pattern.finditer(text):
                 upi_id = match.group(1).lower()
                 # Validate UPI format (user@provider)
-                if '@' in upi_id and len(upi_id.split('@')[0]) >= 3:
-                    upi_ids.add(upi_id)
+                if '@' in upi_id:
+                    parts = upi_id.split('@')
+                    handle = parts[0]
+                    domain = parts[1]
+                    # Valid UPI: handle >= 2 chars, domain not a known email domain
+                    if len(handle) >= 2 and domain not in self._email_domains:
+                        upi_ids.add(upi_id)
         return list(upi_ids)
     
     def _extract_bank_details(self, text: str) -> List[Dict[str, str]]:
@@ -420,6 +445,10 @@ class ArtifactExtractor:
         for pattern in self._url_patterns:
             for match in pattern.finditer(text):
                 url = match.group(1)
+                # Skip if preceded by @ (part of an email address)
+                start_pos = match.start(1)
+                if start_pos > 0 and text[start_pos - 1] == '@':
+                    continue
                 # Clean and normalize
                 url = url.rstrip('.,;:!?)')
                 if len(url) > 8:  # Minimum meaningful URL length
@@ -443,7 +472,7 @@ class ArtifactExtractor:
         # Only accept bare 10-digit if phone context present OR prefix validates
         has_phone_context = any(kw in text_lower for kw in [
             "call", "phone", "number", "mobile", "contact", "dial", "reach",
-            "whatsapp", "sms", "text",
+            "whatsapp", "sms", "text", "msg", "ring",
         ])
         
         seen_normalized = {}  # normalized_digits -> phone_object
@@ -451,31 +480,42 @@ class ArtifactExtractor:
         for i, pattern in enumerate(self._phone_patterns):
             for match in pattern.finditer(text):
                 phone = match.group(1)
-                normalized = re.sub(r'[-.\ s()]', '', phone)
+                normalized = re.sub(r'[-.\s()]', '', phone)
                 
-                # CRITICAL: For bare 10-digit (pattern index 3), check Indian mobile prefix
-                if i == 3 and len(normalized) == 10:  
-                    # Run prefix validation
+                # ANY 10-digit all-numeric → check TRAI Indian mobile validation
+                if len(normalized) == 10 and normalized.isdigit():
                     validation = self._mobile_validator.validate(normalized)
                     
                     if validation["is_mobile"]:
-                        # TRAI prefix match = ALWAYS accept as phone
-                        if normalized not in seen_normalized:
-                            seen_normalized[normalized] = {
-                                "number": phone,
+                        # TRAI prefix match → store as +91 number (dedup across patterns)
+                        prefixed = "+91" + normalized
+                        if prefixed not in seen_normalized:
+                            seen_normalized[prefixed] = {
+                                "number": prefixed,
                                 "carrier": validation["carrier"],
                                 "confidence": validation["confidence"],
                             }
-                        continue  # Skip context check
-                    elif not has_phone_context:
-                        # Unknown prefix + no context = reject
+                        continue  # Don't also store bare 10-digit
+                    elif i == 3 and not has_phone_context:
+                        # Bare 10-digit pattern, unknown prefix, no phone context → reject
                         continue
+                    else:
+                        # Non-TRAI but has phone context or explicit format → still Indian mobile, add +91
+                        if normalized[0] in '6789':
+                            prefixed = "+91" + normalized
+                            if prefixed not in seen_normalized:
+                                seen_normalized[prefixed] = {
+                                    "number": prefixed,
+                                    "carrier": None,
+                                    "confidence": 0.7,
+                                }
+                            continue
                 
                 # Non-10-digit or explicit format (+91, international)
                 if 10 <= len(normalized) <= 15:
                     if normalized not in seen_normalized:
                         seen_normalized[normalized] = {
-                            "number": phone,
+                            "number": normalized,
                             "carrier": None,
                             "confidence": 0.95,  # Explicit format
                         }

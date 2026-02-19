@@ -70,7 +70,3 @@ config_local.py
 # Test outputs
 # =========================
 test_outputs/
-
-# =========================
-# Legacy nested directory
-# =========================
