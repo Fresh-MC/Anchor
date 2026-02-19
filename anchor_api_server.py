@@ -402,71 +402,15 @@ if FLASK_AVAILABLE:
 
             _update_session_intel(session_id, artifacts, suspicious_keywords, scam_detected)
 
-            # ── Build intelligence flags from session store ──
-            with _store_lock:
-                session = _session_store.get(session_id, {})
-                sess_scam = session.get("scam_detected", False)
-                intel_flags = {
-                    "phoneNumber": len(session.get("phone_numbers", [])) > 0,
-                    "bankAccount": len(session.get("bank_accounts", [])) > 0,
-                    "upiId": len(session.get("upi_ids", [])) > 0,
-                    "phishingLink": len(session.get("phishing_links", [])) > 0,
-                    "emailAddress": len(session.get("email_addresses", [])) > 0,
-                }
-
-            # Build evaluation-compliant export fields
-            eval_data = _build_export(session_id)
-
             return jsonify({
                 "status": "success",
                 "reply": agent_response,
-                "scamDetected": sess_scam,
-                "intelligenceFlags": intel_flags,
-                "extractedIntelligence": eval_data.get("extractedIntelligence", {
-                    "phoneNumbers": [], "bankAccounts": [], "upiIds": [],
-                    "phishingLinks": [], "emailAddresses": [],
-                }),
-                "engagementMetrics": eval_data.get("engagementMetrics", {
-                    "engagementDurationSeconds": 0, "totalMessagesExchanged": 0,
-                }),
-                "agentNotes": eval_data.get("agentNotes", "Engagement in progress."),
-                "totalMessagesExchanged": eval_data.get("totalMessagesExchanged", 0),
             })
 
         except Exception:
-            # Attempt to recover session data if any was persisted before error
-            recovered = {}
-            try:
-                raw = request.get_json(silent=True) or {}
-                sid = raw.get("sessionId", "default")
-                recovered = _build_export(sid)
-            except Exception:
-                pass
-
             return jsonify({
                 "status": "success",
                 "reply": get_survival_reply(),
-                "scamDetected": recovered.get("scamDetected", False),
-                "intelligenceFlags": {
-                    "phoneNumber": len(recovered.get("extractedIntelligence", {}).get("phoneNumbers", [])) > 0,
-                    "bankAccount": len(recovered.get("extractedIntelligence", {}).get("bankAccounts", [])) > 0,
-                    "upiId": len(recovered.get("extractedIntelligence", {}).get("upiIds", [])) > 0,
-                    "phishingLink": len(recovered.get("extractedIntelligence", {}).get("phishingLinks", [])) > 0,
-                    "emailAddress": len(recovered.get("extractedIntelligence", {}).get("emailAddresses", [])) > 0,
-                },
-                "extractedIntelligence": recovered.get("extractedIntelligence", {
-                    "phoneNumbers": [],
-                    "bankAccounts": [],
-                    "upiIds": [],
-                    "phishingLinks": [],
-                    "emailAddresses": [],
-                }),
-                "engagementMetrics": recovered.get("engagementMetrics", {
-                    "engagementDurationSeconds": 0,
-                    "totalMessagesExchanged": 0,
-                }),
-                "agentNotes": recovered.get("agentNotes", "Error during processing. Engagement maintained."),
-                "totalMessagesExchanged": recovered.get("totalMessagesExchanged", 0),
             })
 
     @app.route('/export/session/<session_id>', methods=['GET'])

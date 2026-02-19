@@ -66,17 +66,11 @@ try:
     
     check("process returns status=success", result.get("status") == "success")
     check("process returns non-empty reply", bool(result.get("reply")))
-    # Response must contain: status, reply, scamDetected, intelligenceFlags + evaluation fields
-    required_keys = {"status", "reply", "scamDetected", "intelligenceFlags",
-                     "extractedIntelligence", "engagementMetrics", "agentNotes", "totalMessagesExchanged"}
-    missing_keys = required_keys - set(result.keys())
-    check("process returns all required keys", len(missing_keys) == 0,
-          f"missing keys: {missing_keys}")
-    check("process has scamDetected (bool)", isinstance(result.get("scamDetected"), bool))
-    flags = result.get("intelligenceFlags", {})
-    check("process has intelligenceFlags (dict)", isinstance(flags, dict))
-    for fk in ["phoneNumber", "bankAccount", "upiId", "phishingLink", "emailAddress"]:
-        check(f"intelligenceFlags.{fk} is bool", isinstance(flags.get(fk), bool))
+    # /process must return ONLY {status, reply} — no intelligence keys
+    allowed_keys = {"status", "reply"}
+    extra_keys = set(result.keys()) - allowed_keys
+    check("process returns ONLY status+reply", len(extra_keys) == 0,
+          f"extra keys: {extra_keys}")
 except Exception as e:
     failed += 1
     print(f"  FAIL: Process error: {e}", flush=True)
@@ -103,12 +97,10 @@ try:
     
     check("process with artifacts returns status=success", result.get("status") == "success")
     check("process with artifacts returns reply", bool(result.get("reply")))
-    check("process with artifacts has extractedIntelligence", isinstance(result.get("extractedIntelligence"), dict))
-    check("process with artifacts has engagementMetrics", isinstance(result.get("engagementMetrics"), dict))
-    check("artifacts scamDetected is true", result.get("scamDetected") == True)
-    flags = result.get("intelligenceFlags", {})
-    check("artifacts upiId flag is true", flags.get("upiId") == True)
-    check("artifacts phoneNumber flag is true", flags.get("phoneNumber") == True)
+    # /process must return ONLY {status, reply} — intelligence is in /export
+    extra_keys = set(result.keys()) - {"status", "reply"}
+    check("process with artifacts returns ONLY status+reply", len(extra_keys) == 0,
+          f"extra keys: {extra_keys}")
 except Exception as e:
     failed += 1
     print(f"  FAIL: Process with artifacts error: {e}", flush=True)
