@@ -67,6 +67,8 @@ def _get_or_create_session(session_id: str) -> dict:
                 "order_numbers": [],
                 "generic_ids": [],
                 "scam_detected": False,
+                "scam_type": "",
+                "confidence_score": 0.0,
                 "agent_notes": "",
             }
         return _session_store[session_id]
@@ -140,6 +142,48 @@ def _update_session_intel(session_id: str, artifacts: dict, keywords: list, scam
         if scam_detected:
             session["scam_detected"] = True
 
+        # ── Dynamically derive scam_type from artifact profile ──
+        has_phishing = len(session["phishing_links"]) > 0
+        has_financial = (
+            len(session["bank_accounts"]) > 0
+            or len(session["upi_ids"]) > 0
+            or len(session.get("crypto_wallets", [])) > 0
+        )
+        has_identity = (
+            len(session["email_addresses"]) > 0
+            or len(session.get("case_ids", [])) > 0
+            or len(session.get("policy_numbers", [])) > 0
+            or len(session.get("order_numbers", [])) > 0
+        )
+
+        if has_phishing and has_financial:
+            session["scam_type"] = "phishing_financial_fraud"
+        elif has_phishing:
+            session["scam_type"] = "phishing"
+        elif has_financial:
+            session["scam_type"] = "financial_fraud"
+        elif has_identity:
+            session["scam_type"] = "identity_fraud"
+        elif session["scam_detected"]:
+            session["scam_type"] = "social_engineering"
+        # else: leave as empty string (no scam indicators)
+
+        # ── Dynamically compute confidence_score (0.0 – 1.0) ──
+        artifact_types_found = sum([
+            len(session["phone_numbers"]) > 0,
+            len(session["bank_accounts"]) > 0,
+            len(session["upi_ids"]) > 0,
+            len(session["phishing_links"]) > 0,
+            len(session["email_addresses"]) > 0,
+            len(session.get("case_ids", [])) > 0,
+            len(session.get("policy_numbers", [])) > 0,
+            len(session.get("order_numbers", [])) > 0,
+        ])
+        keyword_count = len(session["suspicious_keywords"])
+        # Score: each artifact type = 0.1, each keyword = 0.05, cap at 1.0
+        raw_score = artifact_types_found * 0.1 + keyword_count * 0.05
+        session["confidence_score"] = min(round(raw_score, 2), 1.0)
+
 
 def _build_export(session_id: str) -> dict:
     """Build the final evaluation-compliant export structure for a session."""
@@ -170,9 +214,9 @@ def _build_export(session_id: str) -> dict:
             "agentNotes": "No session data found.",
         }
 
-    # Count both directions: each /process call = scammer msg + agent reply
-    total = session["total_messages"] * 2
-    # Real elapsed time — no simulated inflation (PART 3)
+    # Real session values — no hardcoded inflation
+    total = session["total_messages"]
+    # Real elapsed time — no simulated inflation
     duration = int(session["last_activity"] - session["start_time"])
 
     # Flatten phone numbers to plain strings for export
@@ -217,7 +261,7 @@ def _build_export(session_id: str) -> dict:
     else:
         notes = "Engagement completed. No scam indicators detected."
 
-    return {
+    export = {
         "status": "completed",
         "sessionId": session_id,
         "scamDetected": session["scam_detected"],
@@ -225,13 +269,13 @@ def _build_export(session_id: str) -> dict:
         "extractedIntelligence": {
             "phoneNumbers": phone_list,
             "bankAccounts": bank_list,
-            "upiIds": session["upi_ids"],
-            "phishingLinks": session["phishing_links"],
-            "emailAddresses": session["email_addresses"],
-            "caseIds": session.get("case_ids", []),
-            "policyNumbers": session.get("policy_numbers", []),
-            "orderNumbers": session.get("order_numbers", []),
-            "genericIds": session.get("generic_ids", []),
+            "upiIds": list(session["upi_ids"]),
+            "phishingLinks": list(session["phishing_links"]),
+            "emailAddresses": list(session["email_addresses"]),
+            "caseIds": list(session.get("case_ids", [])),
+            "policyNumbers": list(session.get("policy_numbers", [])),
+            "orderNumbers": list(session.get("order_numbers", [])),
+            "genericIds": list(session.get("generic_ids", [])),
         },
         "engagementMetrics": {
             "totalMessagesExchanged": total,
@@ -239,6 +283,22 @@ def _build_export(session_id: str) -> dict:
         },
         "agentNotes": notes,
     }
+
+    # Optional fields — only present when scam is detected
+    if session["scam_detected"]:
+        scam_type = session.get("scam_type", "")
+        confidence = session.get("confidence_score", 0.0)
+        if scam_type:
+            export["scamType"] = scam_type
+        # Map numeric score to level label
+        if confidence >= 0.7:
+            export["confidenceLevel"] = "high"
+        elif confidence >= 0.3:
+            export["confidenceLevel"] = "medium"
+        elif confidence > 0:
+            export["confidenceLevel"] = "low"
+
+    return export
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -464,7 +524,7 @@ if FLASK_AVAILABLE:
                 "engagementDurationSeconds": 0, "totalMessagesExchanged": 0,
             })
 
-            return jsonify({
+            response_payload = {
                 "status": "success",
                 "sessionId": session_id,
                 "reply": agent_response,
@@ -480,7 +540,15 @@ if FLASK_AVAILABLE:
                 "engagementDurationSeconds": engagement_metrics.get("engagementDurationSeconds", 0),
                 "agentNotes": eval_data.get("agentNotes", "Engagement in progress."),
                 "totalMessagesExchanged": eval_data.get("totalMessagesExchanged", 0),
-            })
+            }
+
+            # Forward optional scamType / confidenceLevel when present
+            if "scamType" in eval_data:
+                response_payload["scamType"] = eval_data["scamType"]
+            if "confidenceLevel" in eval_data:
+                response_payload["confidenceLevel"] = eval_data["confidenceLevel"]
+
+            return jsonify(response_payload)
 
         except Exception:
             # Attempt to recover session data if any was persisted before error
@@ -498,7 +566,7 @@ if FLASK_AVAILABLE:
                 "totalMessagesExchanged": 0,
             })
 
-            return jsonify({
+            err_payload = {
                 "status": "success",
                 "sessionId": err_sid,
                 "reply": get_survival_reply(),
@@ -528,7 +596,15 @@ if FLASK_AVAILABLE:
                 "engagementDurationSeconds": recovered_metrics.get("engagementDurationSeconds", 0),
                 "agentNotes": recovered.get("agentNotes", "Error during processing. Engagement maintained."),
                 "totalMessagesExchanged": recovered.get("totalMessagesExchanged", 0),
-            })
+            }
+
+            # Forward optional scamType / confidenceLevel from recovered data
+            if "scamType" in recovered:
+                err_payload["scamType"] = recovered["scamType"]
+            if "confidenceLevel" in recovered:
+                err_payload["confidenceLevel"] = recovered["confidenceLevel"]
+
+            return jsonify(err_payload)
 
     @app.route('/export/session/<session_id>', methods=['GET'])
     def export_session(session_id):
