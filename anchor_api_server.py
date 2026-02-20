@@ -62,6 +62,10 @@ def _get_or_create_session(session_id: str) -> dict:
                 "email_addresses": [],
                 "crypto_wallets": [],
                 "suspicious_keywords": [],
+                "case_ids": [],
+                "policy_numbers": [],
+                "order_numbers": [],
+                "generic_ids": [],
                 "scam_detected": False,
                 "agent_notes": "",
             }
@@ -124,6 +128,14 @@ def _update_session_intel(session_id: str, artifacts: dict, keywords: list, scam
                 session["suspicious_keywords"].append(kw)
                 existing_kw.add(kw)
 
+        # Merge context-aware IDs (deduplicate)
+        for id_key in ["case_ids", "policy_numbers", "order_numbers", "generic_ids"]:
+            existing = set(session.get(id_key, []))
+            for val in artifacts.get(id_key, []):
+                if val not in existing:
+                    session.setdefault(id_key, []).append(val)
+                    existing.add(val)
+
         # Scam detection latches true once detected
         if scam_detected:
             session["scam_detected"] = True
@@ -146,6 +158,10 @@ def _build_export(session_id: str) -> dict:
                 "upiIds": [],
                 "phishingLinks": [],
                 "emailAddresses": [],
+                "caseIds": [],
+                "policyNumbers": [],
+                "orderNumbers": [],
+                "genericIds": [],
             },
             "engagementMetrics": {
                 "totalMessagesExchanged": 0,
@@ -187,6 +203,12 @@ def _build_export(session_id: str) -> dict:
         intel_parts.append(f"{len(session['phishing_links'])} phishing link(s)")
     if session["email_addresses"]:
         intel_parts.append(f"{len(session['email_addresses'])} email(s)")
+    if session.get("case_ids"):
+        intel_parts.append(f"{len(session['case_ids'])} case/ref ID(s)")
+    if session.get("policy_numbers"):
+        intel_parts.append(f"{len(session['policy_numbers'])} policy number(s)")
+    if session.get("order_numbers"):
+        intel_parts.append(f"{len(session['order_numbers'])} order number(s)")
 
     if intel_parts:
         notes = f"Autonomous engagement completed. Extracted: {', '.join(intel_parts)}."
@@ -206,6 +228,10 @@ def _build_export(session_id: str) -> dict:
             "upiIds": session["upi_ids"],
             "phishingLinks": session["phishing_links"],
             "emailAddresses": session["email_addresses"],
+            "caseIds": session.get("case_ids", []),
+            "policyNumbers": session.get("policy_numbers", []),
+            "orderNumbers": session.get("order_numbers", []),
+            "genericIds": session.get("generic_ids", []),
         },
         "engagementMetrics": {
             "totalMessagesExchanged": total,
@@ -398,7 +424,9 @@ if FLASK_AVAILABLE:
                 extra_dict = extra.to_dict() if hasattr(extra, 'to_dict') else {}
                 # Merge secondary artifacts into main dict
                 for key in ["phone_numbers", "bank_accounts", "upi_ids",
-                            "phishing_links", "emails", "crypto_wallets"]:
+                            "phishing_links", "emails", "crypto_wallets",
+                            "case_ids", "policy_numbers", "order_numbers",
+                            "generic_ids"]:
                     existing = artifacts.get(key, [])
                     for item in extra_dict.get(key, []):
                         if item not in existing:
@@ -424,6 +452,9 @@ if FLASK_AVAILABLE:
                     "upiId": len(session.get("upi_ids", [])) > 0,
                     "phishingLink": len(session.get("phishing_links", [])) > 0,
                     "emailAddress": len(session.get("email_addresses", [])) > 0,
+                    "caseId": len(session.get("case_ids", [])) > 0,
+                    "policyNumber": len(session.get("policy_numbers", [])) > 0,
+                    "orderNumber": len(session.get("order_numbers", [])) > 0,
                 }
 
             # Build evaluation-compliant export fields
@@ -442,6 +473,8 @@ if FLASK_AVAILABLE:
                 "extractedIntelligence": eval_data.get("extractedIntelligence", {
                     "phoneNumbers": [], "bankAccounts": [], "upiIds": [],
                     "phishingLinks": [], "emailAddresses": [],
+                    "caseIds": [], "policyNumbers": [], "orderNumbers": [],
+                    "genericIds": [],
                 }),
                 "engagementMetrics": engagement_metrics,
                 "engagementDurationSeconds": engagement_metrics.get("engagementDurationSeconds", 0),
@@ -476,6 +509,9 @@ if FLASK_AVAILABLE:
                     "upiId": len(recovered.get("extractedIntelligence", {}).get("upiIds", [])) > 0,
                     "phishingLink": len(recovered.get("extractedIntelligence", {}).get("phishingLinks", [])) > 0,
                     "emailAddress": len(recovered.get("extractedIntelligence", {}).get("emailAddresses", [])) > 0,
+                    "caseId": len(recovered.get("extractedIntelligence", {}).get("caseIds", [])) > 0,
+                    "policyNumber": len(recovered.get("extractedIntelligence", {}).get("policyNumbers", [])) > 0,
+                    "orderNumber": len(recovered.get("extractedIntelligence", {}).get("orderNumbers", [])) > 0,
                 },
                 "extractedIntelligence": recovered.get("extractedIntelligence", {
                     "phoneNumbers": [],
@@ -483,6 +519,10 @@ if FLASK_AVAILABLE:
                     "upiIds": [],
                     "phishingLinks": [],
                     "emailAddresses": [],
+                    "caseIds": [],
+                    "policyNumbers": [],
+                    "orderNumbers": [],
+                    "genericIds": [],
                 }),
                 "engagementMetrics": recovered_metrics,
                 "engagementDurationSeconds": recovered_metrics.get("engagementDurationSeconds", 0),

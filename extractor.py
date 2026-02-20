@@ -162,6 +162,10 @@ class ExtractedArtifacts:
     phone_numbers: List[Dict[str, Any]] = field(default_factory=list)  # Now includes carrier metadata
     crypto_wallets: List[str] = field(default_factory=list)
     emails: List[str] = field(default_factory=list)
+    case_ids: List[str] = field(default_factory=list)
+    policy_numbers: List[str] = field(default_factory=list)
+    order_numbers: List[str] = field(default_factory=list)
+    generic_ids: List[str] = field(default_factory=list)
     
     def to_dict(self) -> Dict[str, List]:
         """Convert to dictionary for JSON response"""
@@ -172,6 +176,10 @@ class ExtractedArtifacts:
             "phone_numbers": self.phone_numbers,
             "crypto_wallets": self.crypto_wallets,
             "emails": self.emails,
+            "case_ids": self.case_ids,
+            "policy_numbers": self.policy_numbers,
+            "order_numbers": self.order_numbers,
+            "generic_ids": self.generic_ids,
         }
     
     def has_artifacts(self) -> bool:
@@ -183,6 +191,10 @@ class ExtractedArtifacts:
             self.phone_numbers,
             self.crypto_wallets,
             self.emails,
+            self.case_ids,
+            self.policy_numbers,
+            self.order_numbers,
+            self.generic_ids,
         ])
     
     def merge(self, other: 'ExtractedArtifacts') -> None:
@@ -191,6 +203,10 @@ class ExtractedArtifacts:
         self.phishing_links = list(set(self.phishing_links + other.phishing_links))
         self.crypto_wallets = list(set(self.crypto_wallets + other.crypto_wallets))
         self.emails = list(set(self.emails + other.emails))
+        self.case_ids = list(set(self.case_ids + other.case_ids))
+        self.policy_numbers = list(set(self.policy_numbers + other.policy_numbers))
+        self.order_numbers = list(set(self.order_numbers + other.order_numbers))
+        self.generic_ids = list(set(self.generic_ids + other.generic_ids))
         
         # Phone numbers need special handling (now dicts with metadata)
         existing_phone_numbers = {p.get("number", p) if isinstance(p, dict) else p for p in self.phone_numbers}
@@ -249,7 +265,7 @@ class ArtifactExtractor:
         
         # Phone number patterns (international)
         self._phone_patterns = [
-            re.compile(r'(?:\+?\d{1,3}[\-\s]?)?(?:\(?\d{3}\)?[\-\s]?)?\d{3,4}[\-\s]?\d{4}'),  # Broad intl
+            re.compile(r'(?<!\d)((?:\+?\d{1,3}[-\s]?)?\(?\d{3}\)?[-\s]?\d{3}[-\s]?\d{4})(?!\d)'),  # Robust intl (with boundaries)
             re.compile(r'(?<!\w)(\+91[-.\s]?\d{10})(?!\d)'),  # India +91 (fixed: \b fails before +)
             re.compile(r'(?<!\w)(\+\d{1,3}[-.\s]?\d{6,14})(?!\d)'),  # International (fixed)
             re.compile(r'\b(\d{10})\b'),  # 10-digit (contextual)
@@ -267,6 +283,23 @@ class ArtifactExtractor:
         # Email patterns
         self._email_pattern = re.compile(
             r'\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b'
+        )
+        
+        # Context-aware ID patterns (case IDs, policy numbers, order numbers)
+        self._case_id_pattern = re.compile(
+            r'(?i)(?:case|ref|reference)[\s#:\-]+([A-Za-z0-9][A-Za-z0-9\-]+)'
+        )
+        self._policy_pattern = re.compile(
+            r'(?i)policy[\s#:\-]+([A-Za-z0-9][A-Za-z0-9\-]+)'
+        )
+        self._order_pattern = re.compile(
+            r'(?i)order[\s#:\-]+([A-Za-z0-9][A-Za-z0-9\-]+)'
+        )
+        
+        # Generic formal ID fallback (e.g., ABC-123, CASE-2024-001)
+        # Conservative: must start with letter, contain hyphen, uppercase only
+        self._generic_id_pattern = re.compile(
+            r'\b([A-Z][A-Z0-9]*-[A-Z0-9](?:[A-Z0-9\-]*[A-Z0-9])?)\b'
         )
         
         # Known scam domains (for flagging)
@@ -343,6 +376,28 @@ class ArtifactExtractor:
         except Exception:
             artifacts.emails = []
         
+        try:
+            artifacts.case_ids = self._extract_case_ids(text)
+        except Exception:
+            artifacts.case_ids = []
+        
+        try:
+            artifacts.policy_numbers = self._extract_policy_numbers(text)
+        except Exception:
+            artifacts.policy_numbers = []
+        
+        try:
+            artifacts.order_numbers = self._extract_order_numbers(text)
+        except Exception:
+            artifacts.order_numbers = []
+        
+        try:
+            # Generic IDs: exclude already-captured IDs to avoid duplicates
+            already_captured = set(artifacts.case_ids + artifacts.policy_numbers + artifacts.order_numbers)
+            artifacts.generic_ids = self._extract_generic_ids(text, already_captured)
+        except Exception:
+            artifacts.generic_ids = []
+        
         return artifacts
 
     def extract_suspicious_keywords(self, text: str) -> List[str]:
@@ -370,8 +425,7 @@ class ArtifactExtractor:
         return list(upi_ids)
     
     def _extract_bank_details(self, text: str) -> List[Dict[str, str]]:
-        """Extract bank account details with context validation"""
-        accounts = []
+        """Extract bank account details with context validation (global matching)"""
         text_lower = text.lower()
         
         # Require banking context within the message to accept account numbers
@@ -383,51 +437,50 @@ class ArtifactExtractor:
             "remittance", "passbook", "ledger", "statement",
         ])
         
-        # Look for account numbers with context
-        account_match = self._bank_patterns['account_number'].search(text)
-        ifsc_match = self._bank_patterns['ifsc'].search(text)
-        swift_match = self._bank_patterns['swift'].search(text)
-        routing_match = self._bank_patterns['routing'].search(text)
-        iban_match = self._bank_patterns['iban'].search(text)
+        # Global matching using finditer — captures ALL occurrences (not just first)
+        valid_nums = []
+        if banking_context:
+            for m in self._bank_patterns['account_number'].finditer(text):
+                num = m.group(1)
+                # CRITICAL: Exclude 10-digit Indian mobile numbers
+                if len(num) == 10:
+                    if self._mobile_validator.validate(num)["is_mobile"]:
+                        continue
+                # Filter non-account patterns
+                if len(num) >= 9 and not num.startswith('0000') and len(set(num)) > 2:
+                    valid_nums.append(num)
         
-        # Build account object if we have enough info
-        account = {}
+        ifsc_codes = [m.group(1) for m in self._bank_patterns['ifsc'].finditer(text)]
+        swift_codes = [m.group(1) for m in self._bank_patterns['swift'].finditer(text)
+                       if len(m.group(1)) in (8, 11)]
+        routing_nums = [m.group(1) for m in self._bank_patterns['routing'].finditer(text)]
+        iban_nums = [m.group(1) for m in self._bank_patterns['iban'].finditer(text)
+                     if 15 <= len(m.group(1)) <= 34]
         
-        if account_match and banking_context:
-            num = account_match.group(1)
-            
-            # CRITICAL: Exclude 10-digit Indian mobile numbers
-            if len(num) == 10:
-                validation = self._mobile_validator.validate(num)
-                if validation["is_mobile"]:
-                    # This is a phone number, NOT a bank account
-                    # Do not add to bank_accounts
-                    num = None
-            
-            # Filter out likely non-account numbers (too round, all zeros, etc.)
-            if num and len(num) >= 9 and not num.startswith('0000') and len(set(num)) > 2:
-                account['account_number'] = num
+        # Deduplicate each list while preserving order
+        valid_nums = list(dict.fromkeys(valid_nums))
+        ifsc_codes = list(dict.fromkeys(ifsc_codes))
+        swift_codes = list(dict.fromkeys(swift_codes))
+        routing_nums = list(dict.fromkeys(routing_nums))
+        iban_nums = list(dict.fromkeys(iban_nums))
         
-        if ifsc_match:
-            account['ifsc'] = ifsc_match.group(1)
+        # Build account entries — one per account number
+        accounts = []
+        for num in valid_nums:
+            accounts.append({"account_number": num})
         
-        if swift_match:
-            candidate = swift_match.group(1)
-            # SWIFT codes must be 8 or 11 chars exactly
-            if len(candidate) in (8, 11):
-                account['swift'] = candidate
-        
-        if routing_match:
-            account['routing_number'] = routing_match.group(1)
-        
-        if iban_match:
-            candidate = iban_match.group(1)
-            # IBAN must be 15-34 chars and start with known 2-letter country code
-            if 15 <= len(candidate) <= 34:
-                account['iban'] = candidate
-        
-        if account:
-            accounts.append(account)
+        # Attach structural codes to account entries, or create standalone
+        for key, values in [("ifsc", ifsc_codes), ("swift", swift_codes),
+                            ("routing_number", routing_nums), ("iban", iban_nums)]:
+            for val in values:
+                attached = False
+                for acct in accounts:
+                    if key not in acct:
+                        acct[key] = val
+                        attached = True
+                        break
+                if not attached:
+                    accounts.append({key: val})
         
         return accounts
     
@@ -554,6 +607,48 @@ class ArtifactExtractor:
                     emails.add(email)
         
         return list(emails)
+    
+    def _extract_case_ids(self, text: str) -> List[str]:
+        """Extract case/reference IDs using context-bound regex (global matching)"""
+        ids = set()
+        for m in self._case_id_pattern.finditer(text):
+            val = m.group(1).strip('-')
+            if len(val) >= 2:
+                ids.add(val)
+        return list(ids)
+    
+    def _extract_policy_numbers(self, text: str) -> List[str]:
+        """Extract policy numbers using context-bound regex (global matching)"""
+        ids = set()
+        for m in self._policy_pattern.finditer(text):
+            val = m.group(1).strip('-')
+            if len(val) >= 2:
+                ids.add(val)
+        return list(ids)
+    
+    def _extract_order_numbers(self, text: str) -> List[str]:
+        """Extract order numbers using context-bound regex (global matching)"""
+        ids = set()
+        for m in self._order_pattern.finditer(text):
+            val = m.group(1).strip('-')
+            if len(val) >= 2:
+                ids.add(val)
+        return list(ids)
+    
+    def _extract_generic_ids(self, text: str, already_captured: set = None) -> List[str]:
+        """
+        Extract generic formal ID-like strings (e.g., ABC-123, CASE-2024-001).
+        Conservative: requires uppercase start, hyphen, min 5 chars.
+        Excludes IDs already captured by context-aware extractors.
+        """
+        already_captured = already_captured or set()
+        ids = set()
+        for m in self._generic_id_pattern.finditer(text):
+            val = m.group(1)
+            # Minimum length to reduce false positives
+            if len(val) >= 5 and val not in already_captured:
+                ids.add(val)
+        return list(ids)
     
     def is_suspicious_url(self, url: str) -> bool:
         """Check if URL is from known suspicious domain"""
