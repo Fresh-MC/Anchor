@@ -303,13 +303,15 @@ class ArtifactExtractor:
             re.compile(r'\b([a-zA-Z0-9-]+\.(?:com|org|net|in|co|io|xyz|info|biz|tk|ml|ga|cf|gq|top|online|site|website|link|click|ru|cn|ng|ph|vn|pw|ws|cc|buzz|work|live|me|pro|app|dev|page|shop|store|support|help|win|review|cloud|finance|bank|pay|secure|verify|login|update|alert)(?:/[^\s]*)?)', re.IGNORECASE),
         ]
         
-        # Phone number patterns — collision-safe (Part 4)
-        # REMOVED: ultra-greedy pattern that matched up to 14+ digits
-        # Rule: exactly 10 digits (India) OR +91/+country prefix
         self._phone_patterns = [
-            re.compile(r'(?<!\w)(\+91[-.\s]?\d{10})(?!\d)'),  # India +91 prefix
-            re.compile(r'(?<!\w)(\+\d{1,3}[-.\s]?\d{7,9})(?!\d)'),  # International with country code (max 9 local digits, ≤12 total)
-            re.compile(r'\b(\d{10})\b'),  # Bare 10-digit (strict TRAI validation + context required)
+            # 1. India +91 prefix (matches +91-98765-43210 or +91 987 654 3210)
+            re.compile(r'(?<!\w)(\+91[-.\s]?(?:\d[-.\s]?){9}\d)(?!\d)'),  
+            
+            # 2. International with country code (matches +1-800-555-1234)
+            re.compile(r'(?<!\w)(\+\d{1,3}[-.\s]?(?:\d[-.\s]?){6,11}\d)(?!\d)'),  
+            
+            # 3. Bare 10-digit (matches 98765-43210 or 987-654-3210)
+            re.compile(r'(?<!\d)((?:\d[-.\s]?){9}\d)(?!\d)'),  
         ]
         
         # Crypto wallet patterns
