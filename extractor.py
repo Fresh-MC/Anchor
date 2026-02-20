@@ -308,7 +308,7 @@ class ArtifactExtractor:
         # Rule: exactly 10 digits (India) OR +91/+country prefix
         self._phone_patterns = [
             re.compile(r'(?<!\w)(\+91[-.\s]?\d{10})(?!\d)'),  # India +91 prefix
-            re.compile(r'(?<!\w)(\+\d{1,3}[-.\s]?\d{7,10})(?!\d)'),  # International with country code (max 10 local digits)
+            re.compile(r'(?<!\w)(\+\d{1,3}[-.\s]?\d{7,9})(?!\d)'),  # International with country code (max 9 local digits, ≤12 total)
             re.compile(r'\b(\d{10})\b'),  # Bare 10-digit (strict TRAI validation + context required)
         ]
         
@@ -328,13 +328,13 @@ class ArtifactExtractor:
         
         # ── ID patterns (Part 3 — collision-resistant) ────────────────────
         # STRUCTURAL patterns (anchored to ID token, no prefix-word capture)
-        self._structural_case_id = re.compile(r'\b([A-Z]{2,}-\d{3,})\b')
+        self._structural_case_id = re.compile(r'\b(SB-\d{3,})\b')
         self._structural_order = re.compile(r'\b(ORD-\d{3,}(?:-[A-Z0-9]+)?)\b')
         self._structural_policy = re.compile(r'\b(POL-\d{4,})\b')
         
         # CONTEXT-AWARE fallbacks (capture group is the ID only, never the prefix word)
         self._context_case_id = re.compile(
-            r'(?i)(?:case|ref(?:erence)?)\s*[#:\-]+\s*([A-Z0-9][-A-Z0-9]+)', re.IGNORECASE
+            r'(?i)(?:case|ref(?:erence)?|complaint|sb)\s*[#:\-]+\s*([A-Z0-9][-A-Z0-9]+)', re.IGNORECASE
         )
         self._context_policy = re.compile(
             r'(?i)policy\s*[#:\-]+\s*([A-Z0-9][-A-Z0-9]+)', re.IGNORECASE
@@ -384,14 +384,15 @@ class ArtifactExtractor:
         """
         Extract all artifacts from text using span-based collision prevention.
         
-        DETERMINISTIC ORDER (highest-to-lowest priority):
-        1. Phishing Links   — most distinctive patterns
-        2. UPI IDs           — @-delimited, low collision risk
-        3. Case / Policy / Order / Generic IDs — alpha-numeric with hyphens
-        4. Bank Accounts     — 11-18 digit numbers (>= 11 disambiguates from phones)
-        5. Crypto Wallets    — alphanumeric with structural prefixes
-        6. Emails            — user@domain.tld
-        7. Phone Numbers     — LAST (most collision-prone, 10-digit only)
+        DETERMINISTIC ORDER (prefix-based classification):
+        1. Phishing Links   — URLs / domains
+        2. Emails           — user@domain.tld (BEFORE UPI to prevent swallowing)
+        3. UPI IDs          — user@provider (no .tld, UPI domains only)
+        4. Policy Numbers   — POL- prefix
+        5. Order Numbers    — ORD- prefix
+        6. Case IDs         — SB- prefix
+        7. Bank Accounts    — 11-18 digit numbers
+        8. Phone Numbers    — LAST (most collision-prone, ≤12 digits)
         
         Each extractor claims character spans. Later extractors cannot
         re-capture text already claimed by an earlier extractor.
@@ -405,53 +406,56 @@ class ArtifactExtractor:
         except Exception:
             artifacts.phishing_links = []
         
-        # ── 2. UPI IDs ─────────────────────────────────────────────────
+        # ── 2. Emails (BEFORE UPI — prevents UPI from swallowing emails) ─
+        try:
+            artifacts.emails = self._extract_emails(text, spans=spans)
+        except Exception:
+            artifacts.emails = []
+        
+        # ── 3. UPI IDs ─────────────────────────────────────────────────
         try:
             artifacts.upi_ids = self._extract_upi(text, spans)
         except Exception:
             artifacts.upi_ids = []
         
-        # ── 3. Case / Policy / Order / Generic IDs ─────────────────────
-        try:
-            artifacts.case_ids = self._extract_case_ids(text, spans)
-        except Exception:
-            artifacts.case_ids = []
-        
+        # ── 4. Policy Numbers (POL- prefix) ────────────────────────────
         try:
             artifacts.policy_numbers = self._extract_policy_numbers(text, spans)
         except Exception:
             artifacts.policy_numbers = []
         
+        # ── 5. Order Numbers (ORD- prefix) ─────────────────────────────
         try:
             artifacts.order_numbers = self._extract_order_numbers(text, spans)
         except Exception:
             artifacts.order_numbers = []
         
+        # ── 6. Case IDs (SB- prefix) ──────────────────────────────────
+        try:
+            artifacts.case_ids = self._extract_case_ids(text, spans)
+        except Exception:
+            artifacts.case_ids = []
+        
+        # ── Generic IDs (fallback for non-prefixed formal IDs) ─────────
         try:
             already_captured = set(artifacts.case_ids + artifacts.policy_numbers + artifacts.order_numbers)
             artifacts.generic_ids = self._extract_generic_ids(text, spans, already_captured)
         except Exception:
             artifacts.generic_ids = []
         
-        # ── 4. Bank Accounts ───────────────────────────────────────────
+        # ── 7. Bank Accounts ───────────────────────────────────────────
         try:
             artifacts.bank_accounts = self._extract_bank_details(text, spans)
         except Exception:
             artifacts.bank_accounts = []
         
-        # ── 5. Crypto Wallets ──────────────────────────────────────────
+        # ── Crypto Wallets ─────────────────────────────────────────────
         try:
             artifacts.crypto_wallets = self._extract_crypto(text, spans)
         except Exception:
             artifacts.crypto_wallets = []
         
-        # ── 6. Emails ──────────────────────────────────────────────────
-        try:
-            artifacts.emails = self._extract_emails(text, exclude=artifacts.upi_ids, spans=spans)
-        except Exception:
-            artifacts.emails = []
-        
-        # ── 7. Phone Numbers (LAST — most collision-prone) ─────────────
+        # ── 8. Phone Numbers (LAST — most collision-prone, ≤12 digits) ─
         try:
             artifacts.phone_numbers = self._extract_phones(text, spans)
         except Exception:
@@ -502,6 +506,9 @@ class ArtifactExtractor:
         valid_nums = []
         if banking_context:
             for m in self._bank_patterns['account_number'].finditer(text):
+                # Skip phone numbers with country code prefix (+)
+                if m.start() > 0 and text[m.start() - 1] == '+':
+                    continue
                 # Span collision check
                 if not spans.try_claim(m.start(), m.end()):
                     continue
@@ -562,13 +569,18 @@ class ArtifactExtractor:
         
         for pattern in self._url_patterns:
             for match in pattern.finditer(text):
-                # Span collision check
-                if not spans.try_claim(match.start(), match.end()):
-                    continue
                 url = match.group(1)
-                # Skip if preceded by @ (part of an email address)
                 start_pos = match.start(1)
+                # Skip if preceded by @ (part of an email address)
                 if start_pos > 0 and text[start_pos - 1] == '@':
+                    continue
+                # Skip if this domain is embedded in an email (e.g., gov.in from user@domain.gov.in)
+                text_before = text[:start_pos]
+                at_pos = text_before.rfind('@')
+                if at_pos >= 0 and re.match(r'^[a-zA-Z0-9._-]*$', text_before[at_pos + 1:]):
+                    continue
+                # Span collision check (AFTER email guards — never waste spans on email parts)
+                if not spans.try_claim(match.start(), match.end()):
                     continue
                 # Clean and normalize
                 url = url.rstrip('.,;:!?)')
@@ -614,6 +626,11 @@ class ArtifactExtractor:
                 
                 phone = match.group(1)
                 normalized = re.sub(r'[-.\s()]', '', phone)
+                digits_only = re.sub(r'\D', '', normalized)
+                
+                # Reject any candidate with > 12 digits total
+                if len(digits_only) > 12:
+                    continue
                 
                 # Reject bare digits with ≥ 11 digits — those are bank accounts
                 if normalized.isdigit() and len(normalized) >= 11:
@@ -649,7 +666,7 @@ class ArtifactExtractor:
                             continue
                 
                 # Non-10-digit or explicit format (+91, international)
-                if 10 <= len(normalized) <= 15:
+                if 10 <= len(digits_only) <= 12:
                     if normalized not in seen_normalized:
                         seen_normalized[normalized] = {
                             "number": normalized,
