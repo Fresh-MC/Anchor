@@ -153,6 +153,46 @@ class IndianMobilePrefixValidator:
         }
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# SPAN-BASED COLLISION PREVENTION
+# ═════════════════════════════════════════════════════════════════════════════
+
+class _SpanTracker:
+    """
+    Tracks character‐position spans of already‐captured matches.
+    
+    Before accepting a new regex match, callers check `try_claim(start, end)`.
+    If the proposed span overlaps ANY previously claimed span, the match is
+    rejected — eliminating cross‐extractor collisions (e.g. phone regex
+    re‐capturing digits already claimed as a bank account number).
+    
+    All spans are half‐open: [start, end).
+    """
+
+    __slots__ = ('_spans',)
+
+    def __init__(self):
+        self._spans: list = []          # list of (start, end) tuples
+
+    def is_overlapping(self, start: int, end: int) -> bool:
+        """Return True if [start, end) overlaps any existing span."""
+        for s, e in self._spans:
+            if start < e and end > s:
+                return True
+        return False
+
+    def add(self, start: int, end: int) -> None:
+        """Register a span unconditionally."""
+        self._spans.append((start, end))
+
+    def try_claim(self, start: int, end: int) -> bool:
+        """Claim [start, end) if it does NOT overlap. Returns True on success."""
+        if self.is_overlapping(start, end):
+            return False
+        self._spans.append((start, end))
+        return True
+
+
 @dataclass
 class ExtractedArtifacts:
     """Container for all extracted artifacts"""
@@ -249,7 +289,7 @@ class ArtifactExtractor:
         
         # Bank account patterns
         self._bank_patterns = {
-            'account_number': re.compile(r'\b(\d{10,18})\b'),  # 10-18 digit account numbers
+            'account_number': re.compile(r'\b(\d{11,18})\b'),  # 11-18 digits (>=11 disambiguates from 10-digit phones)
             'ifsc': re.compile(r'\b([A-Z]{4}0[A-Z0-9]{6})\b'),  # Indian IFSC
             'swift': re.compile(r'\b([A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b'),  # SWIFT/BIC
             'routing': re.compile(r'\brouting[:\s#]*(\d{9})\b', re.IGNORECASE),  # US routing
@@ -263,12 +303,13 @@ class ArtifactExtractor:
             re.compile(r'\b([a-zA-Z0-9-]+\.(?:com|org|net|in|co|io|xyz|info|biz|tk|ml|ga|cf|gq|top|online|site|website|link|click|ru|cn|ng|ph|vn|pw|ws|cc|buzz|work|live|me|pro|app|dev|page|shop|store|support|help|win|review|cloud|finance|bank|pay|secure|verify|login|update|alert)(?:/[^\s]*)?)', re.IGNORECASE),
         ]
         
-        # Phone number patterns (international)
+        # Phone number patterns — collision-safe (Part 4)
+        # REMOVED: ultra-greedy pattern that matched up to 14+ digits
+        # Rule: exactly 10 digits (India) OR +91/+country prefix
         self._phone_patterns = [
-            re.compile(r'(?<!\d)((?:\+?\d{1,3}[-\s]?)?\(?\d{3}\)?[-\s]?\d{3}[-\s]?\d{4})(?!\d)'),  # Robust intl (with boundaries)
-            re.compile(r'(?<!\w)(\+91[-.\s]?\d{10})(?!\d)'),  # India +91 (fixed: \b fails before +)
-            re.compile(r'(?<!\w)(\+\d{1,3}[-.\s]?\d{6,14})(?!\d)'),  # International (fixed)
-            re.compile(r'\b(\d{10})\b'),  # 10-digit (contextual)
+            re.compile(r'(?<!\w)(\+91[-.\s]?\d{10})(?!\d)'),  # India +91 prefix
+            re.compile(r'(?<!\w)(\+\d{1,3}[-.\s]?\d{7,10})(?!\d)'),  # International with country code (max 10 local digits)
+            re.compile(r'\b(\d{10})\b'),  # Bare 10-digit (strict TRAI validation + context required)
         ]
         
         # Crypto wallet patterns
@@ -285,15 +326,21 @@ class ArtifactExtractor:
             r'\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b'
         )
         
-        # Context-aware ID patterns (case IDs, policy numbers, order numbers)
-        self._case_id_pattern = re.compile(
-            r'(?i)(?:case|ref|reference)[\s#:\-]+([A-Za-z0-9][A-Za-z0-9\-]+)'
+        # ── ID patterns (Part 3 — collision-resistant) ────────────────────
+        # STRUCTURAL patterns (anchored to ID token, no prefix-word capture)
+        self._structural_case_id = re.compile(r'\b([A-Z]{2,}-\d{3,})\b')
+        self._structural_order = re.compile(r'\b(ORD-\d{3,}(?:-[A-Z0-9]+)?)\b')
+        self._structural_policy = re.compile(r'\b(POL-\d{4,})\b')
+        
+        # CONTEXT-AWARE fallbacks (capture group is the ID only, never the prefix word)
+        self._context_case_id = re.compile(
+            r'(?i)(?:case|ref(?:erence)?)\s*[#:\-]+\s*([A-Z0-9][-A-Z0-9]+)', re.IGNORECASE
         )
-        self._policy_pattern = re.compile(
-            r'(?i)policy[\s#:\-]+([A-Za-z0-9][A-Za-z0-9\-]+)'
+        self._context_policy = re.compile(
+            r'(?i)policy\s*[#:\-]+\s*([A-Z0-9][-A-Z0-9]+)', re.IGNORECASE
         )
-        self._order_pattern = re.compile(
-            r'(?i)order[\s#:\-]+([A-Za-z0-9][A-Za-z0-9\-]+)'
+        self._context_order = re.compile(
+            r'(?i)order\s*[#:\-]+\s*([A-Z0-9][-A-Z0-9]+)', re.IGNORECASE
         )
         
         # Generic formal ID fallback (e.g., ABC-123, CASE-2024-001)
@@ -335,68 +382,80 @@ class ArtifactExtractor:
     
     def extract(self, text: str) -> ExtractedArtifacts:
         """
-        Extract all artifacts from text.
+        Extract all artifacts from text using span-based collision prevention.
         
-        Args:
-            text: Message text to analyze
-            
-        Returns:
-            ExtractedArtifacts with all findings
+        DETERMINISTIC ORDER (highest-to-lowest priority):
+        1. Phishing Links   — most distinctive patterns
+        2. UPI IDs           — @-delimited, low collision risk
+        3. Case / Policy / Order / Generic IDs — alpha-numeric with hyphens
+        4. Bank Accounts     — 11-18 digit numbers (>= 11 disambiguates from phones)
+        5. Crypto Wallets    — alphanumeric with structural prefixes
+        6. Emails            — user@domain.tld
+        7. Phone Numbers     — LAST (most collision-prone, 10-digit only)
+        
+        Each extractor claims character spans. Later extractors cannot
+        re-capture text already claimed by an earlier extractor.
         """
         artifacts = ExtractedArtifacts()
+        spans = _SpanTracker()
         
-        # Extract each category independently — failure in one must not block others
+        # ── 1. Phishing Links ──────────────────────────────────────────
         try:
-            artifacts.upi_ids = self._extract_upi(text)
-        except Exception:
-            artifacts.upi_ids = []
-        
-        try:
-            artifacts.bank_accounts = self._extract_bank_details(text)
-        except Exception:
-            artifacts.bank_accounts = []
-        
-        try:
-            artifacts.phishing_links = self._extract_urls(text)
+            artifacts.phishing_links = self._extract_urls(text, spans)
         except Exception:
             artifacts.phishing_links = []
         
+        # ── 2. UPI IDs ─────────────────────────────────────────────────
         try:
-            artifacts.phone_numbers = self._extract_phones(text)
+            artifacts.upi_ids = self._extract_upi(text, spans)
         except Exception:
-            artifacts.phone_numbers = []
+            artifacts.upi_ids = []
         
+        # ── 3. Case / Policy / Order / Generic IDs ─────────────────────
         try:
-            artifacts.crypto_wallets = self._extract_crypto(text)
-        except Exception:
-            artifacts.crypto_wallets = []
-        
-        try:
-            artifacts.emails = self._extract_emails(text, exclude=artifacts.upi_ids)
-        except Exception:
-            artifacts.emails = []
-        
-        try:
-            artifacts.case_ids = self._extract_case_ids(text)
+            artifacts.case_ids = self._extract_case_ids(text, spans)
         except Exception:
             artifacts.case_ids = []
         
         try:
-            artifacts.policy_numbers = self._extract_policy_numbers(text)
+            artifacts.policy_numbers = self._extract_policy_numbers(text, spans)
         except Exception:
             artifacts.policy_numbers = []
         
         try:
-            artifacts.order_numbers = self._extract_order_numbers(text)
+            artifacts.order_numbers = self._extract_order_numbers(text, spans)
         except Exception:
             artifacts.order_numbers = []
         
         try:
-            # Generic IDs: exclude already-captured IDs to avoid duplicates
             already_captured = set(artifacts.case_ids + artifacts.policy_numbers + artifacts.order_numbers)
-            artifacts.generic_ids = self._extract_generic_ids(text, already_captured)
+            artifacts.generic_ids = self._extract_generic_ids(text, spans, already_captured)
         except Exception:
             artifacts.generic_ids = []
+        
+        # ── 4. Bank Accounts ───────────────────────────────────────────
+        try:
+            artifacts.bank_accounts = self._extract_bank_details(text, spans)
+        except Exception:
+            artifacts.bank_accounts = []
+        
+        # ── 5. Crypto Wallets ──────────────────────────────────────────
+        try:
+            artifacts.crypto_wallets = self._extract_crypto(text, spans)
+        except Exception:
+            artifacts.crypto_wallets = []
+        
+        # ── 6. Emails ──────────────────────────────────────────────────
+        try:
+            artifacts.emails = self._extract_emails(text, exclude=artifacts.upi_ids, spans=spans)
+        except Exception:
+            artifacts.emails = []
+        
+        # ── 7. Phone Numbers (LAST — most collision-prone) ─────────────
+        try:
+            artifacts.phone_numbers = self._extract_phones(text, spans)
+        except Exception:
+            artifacts.phone_numbers = []
         
         return artifacts
 
@@ -408,11 +467,13 @@ class ArtifactExtractor:
         text_lower = text.lower()
         return [kw for kw in self._suspicious_keywords if kw in text_lower]
 
-    def _extract_upi(self, text: str) -> List[str]:
-        """Extract UPI IDs (excludes known email domains)"""
+    def _extract_upi(self, text: str, spans: _SpanTracker) -> List[str]:
+        """Extract UPI IDs (excludes known email domains). Claims spans."""
         upi_ids = set()
         for pattern in self._upi_patterns:
             for match in pattern.finditer(text):
+                if not spans.try_claim(match.start(), match.end()):
+                    continue
                 upi_id = match.group(1).lower()
                 # Validate UPI format (user@provider)
                 if '@' in upi_id:
@@ -424,8 +485,8 @@ class ArtifactExtractor:
                         upi_ids.add(upi_id)
         return list(upi_ids)
     
-    def _extract_bank_details(self, text: str) -> List[Dict[str, str]]:
-        """Extract bank account details with context validation (global matching)"""
+    def _extract_bank_details(self, text: str, spans: _SpanTracker) -> List[Dict[str, str]]:
+        """Extract bank account details with context validation (global matching, span-aware)."""
         text_lower = text.lower()
         
         # Require banking context within the message to accept account numbers
@@ -437,17 +498,17 @@ class ArtifactExtractor:
             "remittance", "passbook", "ledger", "statement",
         ])
         
-        # Global matching using finditer — captures ALL occurrences (not just first)
+        # Global matching using finditer — captures ALL occurrences
         valid_nums = []
         if banking_context:
             for m in self._bank_patterns['account_number'].finditer(text):
+                # Span collision check
+                if not spans.try_claim(m.start(), m.end()):
+                    continue
                 num = m.group(1)
-                # CRITICAL: Exclude 10-digit Indian mobile numbers
-                if len(num) == 10:
-                    if self._mobile_validator.validate(num)["is_mobile"]:
-                        continue
-                # Filter non-account patterns
-                if len(num) >= 9 and not num.startswith('0000') and len(set(num)) > 2:
+                # Part 5: ≥11 digits guaranteed by regex \d{11,18}
+                # Filter non-account patterns (no leading 0000, min entropy)
+                if not num.startswith('0000') and len(set(num)) > 2:
                     valid_nums.append(num)
         
         ifsc_codes = [m.group(1) for m in self._bank_patterns['ifsc'].finditer(text)]
@@ -495,12 +556,15 @@ class ArtifactExtractor:
         url = url.rstrip('/')
         return url
     
-    def _extract_urls(self, text: str) -> List[str]:
-        """Extract URLs and potential phishing links (deduplicated and normalized)"""
-        raw_urls = set()
+    def _extract_urls(self, text: str, spans: _SpanTracker) -> List[str]:
+        """Extract URLs and potential phishing links (deduplicated, normalized, span-aware)"""
+        raw_urls = {}  # url_text -> match for dedup
         
         for pattern in self._url_patterns:
             for match in pattern.finditer(text):
+                # Span collision check
+                if not spans.try_claim(match.start(), match.end()):
+                    continue
                 url = match.group(1)
                 # Skip if preceded by @ (part of an email address)
                 start_pos = match.start(1)
@@ -509,7 +573,7 @@ class ArtifactExtractor:
                 # Clean and normalize
                 url = url.rstrip('.,;:!?)')
                 if len(url) > 8:  # Minimum meaningful URL length
-                    raw_urls.add(url)
+                    raw_urls[url] = True
         
         # Deduplicate by normalized form (remove http/https duplicates)
         normalized_map = {}
@@ -523,8 +587,16 @@ class ArtifactExtractor:
         
         return list(normalized_map.values())
     
-    def _extract_phones(self, text: str) -> List[Dict[str, Any]]:
-        """Extract phone numbers with Indian mobile prefix validation"""
+    def _extract_phones(self, text: str, spans: _SpanTracker) -> List[Dict[str, Any]]:
+        """
+        Extract phone numbers with strict collision-safe rules (Part 4).
+        
+        Rules:
+        - Exactly 10 digits after normalization (India) OR explicit +91/+country prefix
+        - Bare ≥11 digits are NEVER phones (→ bank accounts)
+        - Span check: reject any match overlapping a previously claimed span
+        - TRAI prefix validation for 10-digit Indian numbers
+        """
         text_lower = text.lower()
         # Only accept bare 10-digit if phone context present OR prefix validates
         has_phone_context = any(kw in text_lower for kw in [
@@ -536,8 +608,16 @@ class ArtifactExtractor:
         
         for i, pattern in enumerate(self._phone_patterns):
             for match in pattern.finditer(text):
+                # ── Span collision check ──
+                if not spans.try_claim(match.start(), match.end()):
+                    continue  # Already claimed by a higher-priority extractor
+                
                 phone = match.group(1)
                 normalized = re.sub(r'[-.\s()]', '', phone)
+                
+                # Reject bare digits with ≥ 11 digits — those are bank accounts
+                if normalized.isdigit() and len(normalized) >= 11:
+                    continue
                 
                 # ANY 10-digit all-numeric → check TRAI Indian mobile validation
                 if len(normalized) == 10 and normalized.isdigit():
@@ -553,8 +633,8 @@ class ArtifactExtractor:
                                 "confidence": validation["confidence"],
                             }
                         continue  # Don't also store bare 10-digit
-                    elif i == 3 and not has_phone_context:
-                        # Bare 10-digit pattern, unknown prefix, no phone context → reject
+                    elif i == 2 and not has_phone_context:
+                        # Bare 10-digit pattern (index 2), unknown prefix, no phone context → reject
                         continue
                     else:
                         # Non-TRAI but has phone context or explicit format → still Indian mobile, add +91
@@ -579,24 +659,28 @@ class ArtifactExtractor:
         
         return list(seen_normalized.values())
     
-    def _extract_crypto(self, text: str) -> List[str]:
-        """Extract cryptocurrency wallet addresses"""
+    def _extract_crypto(self, text: str, spans: _SpanTracker) -> List[str]:
+        """Extract cryptocurrency wallet addresses with span collision prevention"""
         wallets = set()
         
         for pattern in self._crypto_patterns:
             for match in pattern.finditer(text):
+                if not spans.try_claim(match.start(), match.end()):
+                    continue
                 wallet = match.group(1)
                 wallets.add(wallet)
         
         return list(wallets)
     
-    def _extract_emails(self, text: str, exclude: Optional[List[str]] = None) -> List[str]:
-        """Extract email addresses (excluding UPI IDs)"""
+    def _extract_emails(self, text: str, exclude: Optional[List[str]] = None, spans: _SpanTracker = None) -> List[str]:
+        """Extract email addresses (excluding UPI IDs) with span collision prevention"""
         exclude = exclude or []
         exclude_lower = {e.lower() for e in exclude}
         
         emails = set()
         for match in self._email_pattern.finditer(text):
+            if spans and not spans.try_claim(match.start(), match.end()):
+                continue
             email = match.group(1).lower()
             # Exclude UPI IDs (they look like emails)
             if email not in exclude_lower:
@@ -608,42 +692,75 @@ class ArtifactExtractor:
         
         return list(emails)
     
-    def _extract_case_ids(self, text: str) -> List[str]:
-        """Extract case/reference IDs using context-bound regex (global matching)"""
+    def _extract_case_ids(self, text: str, spans: _SpanTracker) -> List[str]:
+        """Extract case/reference IDs using structural + context-aware patterns with span collision prevention"""
         ids = set()
-        for m in self._case_id_pattern.finditer(text):
+        # Structural pattern first (e.g., ABC-123)
+        for m in self._structural_case_id.finditer(text):
+            if not spans.try_claim(m.start(), m.end()):
+                continue
             val = m.group(1).strip('-')
             if len(val) >= 2:
                 ids.add(val)
-        return list(ids)
-    
-    def _extract_policy_numbers(self, text: str) -> List[str]:
-        """Extract policy numbers using context-bound regex (global matching)"""
-        ids = set()
-        for m in self._policy_pattern.finditer(text):
+        # Context-aware fallback (e.g., case: 12345)
+        for m in self._context_case_id.finditer(text):
+            if not spans.try_claim(m.start(), m.end()):
+                continue
             val = m.group(1).strip('-')
-            if len(val) >= 2:
+            if len(val) >= 2 and val not in ids:
                 ids.add(val)
         return list(ids)
     
-    def _extract_order_numbers(self, text: str) -> List[str]:
-        """Extract order numbers using context-bound regex (global matching)"""
+    def _extract_policy_numbers(self, text: str, spans: _SpanTracker) -> List[str]:
+        """Extract policy numbers using structural + context-aware patterns with span collision prevention"""
         ids = set()
-        for m in self._order_pattern.finditer(text):
+        # Structural pattern first (e.g., POL-1234)
+        for m in self._structural_policy.finditer(text):
+            if not spans.try_claim(m.start(), m.end()):
+                continue
             val = m.group(1).strip('-')
             if len(val) >= 2:
                 ids.add(val)
+        # Context-aware fallback (e.g., policy: 12345)
+        for m in self._context_policy.finditer(text):
+            if not spans.try_claim(m.start(), m.end()):
+                continue
+            val = m.group(1).strip('-')
+            if len(val) >= 2 and val not in ids:
+                ids.add(val)
         return list(ids)
     
-    def _extract_generic_ids(self, text: str, already_captured: set = None) -> List[str]:
+    def _extract_order_numbers(self, text: str, spans: _SpanTracker) -> List[str]:
+        """Extract order numbers using structural + context-aware patterns with span collision prevention"""
+        ids = set()
+        # Structural pattern first (e.g., ORD-456)
+        for m in self._structural_order.finditer(text):
+            if not spans.try_claim(m.start(), m.end()):
+                continue
+            val = m.group(1).strip('-')
+            if len(val) >= 2:
+                ids.add(val)
+        # Context-aware fallback (e.g., order: 12345)
+        for m in self._context_order.finditer(text):
+            if not spans.try_claim(m.start(), m.end()):
+                continue
+            val = m.group(1).strip('-')
+            if len(val) >= 2 and val not in ids:
+                ids.add(val)
+        return list(ids)
+    
+    def _extract_generic_ids(self, text: str, spans: _SpanTracker, already_captured: set = None) -> List[str]:
         """
         Extract generic formal ID-like strings (e.g., ABC-123, CASE-2024-001).
         Conservative: requires uppercase start, hyphen, min 5 chars.
         Excludes IDs already captured by context-aware extractors.
+        Uses span collision prevention.
         """
         already_captured = already_captured or set()
         ids = set()
         for m in self._generic_id_pattern.finditer(text):
+            if not spans.try_claim(m.start(), m.end()):
+                continue
             val = m.group(1)
             # Minimum length to reduce false positives
             if len(val) >= 5 and val not in already_captured:
