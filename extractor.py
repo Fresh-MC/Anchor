@@ -386,39 +386,36 @@ class ArtifactExtractor:
         """
         Extract all artifacts from text using span-based collision prevention.
         
-        DETERMINISTIC ORDER (prefix-based classification):
-        1. Phishing Links   — URLs / domains
-        2. Emails           — user@domain.tld (BEFORE UPI to prevent swallowing)
-        3. UPI IDs          — user@provider (no .tld, UPI domains only)
+        DETERMINISTIC ORDER (priority-based classification):
+        1. UPI IDs          — user@provider (MUST go first to protect domains)
+        2. Emails           — user@domain.tld
+        3. Phishing Links   — URLs / domains (Runs after UPI to prevent swallowing)
         4. Policy Numbers   — POL- prefix
         5. Order Numbers    — ORD- prefix
         6. Case IDs         — SB- prefix
         7. Bank Accounts    — 11-18 digit numbers
         8. Phone Numbers    — LAST (most collision-prone, ≤12 digits)
-        
-        Each extractor claims character spans. Later extractors cannot
-        re-capture text already claimed by an earlier extractor.
         """
         artifacts = ExtractedArtifacts()
         spans = _SpanTracker()
         
-        # ── 1. Phishing Links ──────────────────────────────────────────
-        try:
-            artifacts.phishing_links = self._extract_urls(text, spans)
-        except Exception:
-            artifacts.phishing_links = []
-        
-        # ── 2. Emails (BEFORE UPI — prevents UPI from swallowing emails) ─
-        try:
-            artifacts.emails = self._extract_emails(text, spans=spans)
-        except Exception:
-            artifacts.emails = []
-        
-        # ── 3. UPI IDs ─────────────────────────────────────────────────
+        # ── 1. UPI IDs (FIRST: protects 'security.verify@okhdfcbank') ──
         try:
             artifacts.upi_ids = self._extract_upi(text, spans)
         except Exception:
             artifacts.upi_ids = []
+
+        # ── 2. Emails ──────────────────────────────────────────────────
+        try:
+            artifacts.emails = self._extract_emails(text, exclude=artifacts.upi_ids, spans=spans)
+        except Exception:
+            artifacts.emails = []
+
+        # ── 3. Phishing Links (Now safe from stealing UPI domains) ─────
+        try:
+            artifacts.phishing_links = self._extract_urls(text, spans)
+        except Exception:
+            artifacts.phishing_links = []
         
         # ── 4. Policy Numbers (POL- prefix) ────────────────────────────
         try:
@@ -464,7 +461,6 @@ class ArtifactExtractor:
             artifacts.phone_numbers = []
         
         return artifacts
-
     def extract_suspicious_keywords(self, text: str) -> List[str]:
         """
         Extract suspicious scam-related keywords from text.
