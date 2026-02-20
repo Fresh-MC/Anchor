@@ -221,7 +221,7 @@ class ArtifactExtractor:
         # UPI patterns (Indian payment system)
         self._upi_patterns = [
             re.compile(r'\b([a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64})\b'),  # user@bank (broad, robust)
-            re.compile(r'\b([a-zA-Z0-9._-]+@(?:paytm|gpay|phonepe|ybl|okaxis|oksbi|okhdfcbank|axl|ibl|upi|apl|fbl|boi|kotak|sbi|icici|hdfcbank|airtel|jio|postbank|unionbank|pnb|bob|canara|idbi|rbl|indus|federal|jupiter|kbl|freecharge|mobikwik|slice|cred|amazonpay|abfspay|waicici|wahdfcbank|wasbi|waaxis))\b', re.IGNORECASE),
+            re.compile(r'\b([a-zA-Z0-9._-]+@(?:paytm|gpay|phonepe|ybl|okaxis|oksbi|okhdfcbank|axl|ibl|upi|apl|fbl|boi|kotak|sbi|icici|hdfcbank|airtel|jio|postbank|unionbank|pnb|bob|canara|idbi|rbl|indus|federal|jupiter|kbl|freecharge|mobikwik|slice|cred|amazonpay|abfspay|waicici|wahdfcbank|wasbi|waaxis|niyopay|dlb|equitas|fino|aubank|tmb|dbs|kvb|hsbc|sc|citi|baroda|mahb|pockets|dhani|groww|fi|niyo|payzapp))\b', re.IGNORECASE),
         ]
 
         # Known email domains (excluded from UPI detection)
@@ -244,7 +244,7 @@ class ArtifactExtractor:
         self._url_patterns = [
             re.compile(r'(https?://[^\s<>"{}|\\^`\[\]]+)', re.IGNORECASE),
             re.compile(r'(www\.[^\s<>"{}|\\^`\[\]]+)', re.IGNORECASE),
-            re.compile(r'\b([a-zA-Z0-9-]+\.(?:com|org|net|in|co|io|xyz|info|biz|tk|ml|ga|cf|gq|top|online|site|website|link|click)(?:/[^\s]*)?)\b', re.IGNORECASE),
+            re.compile(r'\b([a-zA-Z0-9-]+\.(?:com|org|net|in|co|io|xyz|info|biz|tk|ml|ga|cf|gq|top|online|site|website|link|click|ru|cn|ng|ph|vn|pw|ws|cc|buzz|work|live|me|pro|app|dev|page|shop|store|support|help|win|review|cloud|finance|bank|pay|secure|verify|login|update|alert)(?:/[^\s]*)?)', re.IGNORECASE),
         ]
         
         # Phone number patterns (international)
@@ -272,7 +272,9 @@ class ArtifactExtractor:
         # Known scam domains (for flagging)
         self._suspicious_domains = {
             'bit.ly', 'tinyurl.com', 'goo.gl', 't.co',  # Shorteners
+            'is.gd', 'rb.gy', 'cutt.ly', 'shorturl.at',  # More shorteners
             'paytm.link', 'gpay.link',  # Fake payment
+            'secure-login', 'verify-account', 'update-info',  # Phishing fragments
         }
 
         # Suspicious scam-related keywords for extraction
@@ -376,7 +378,9 @@ class ArtifactExtractor:
         banking_context = any(kw in text_lower for kw in [
             "account", "acct", "a/c", "beneficiary", "transfer",
             "ifsc", "swift", "routing", "iban", "bank", "wire",
-            "neft", "rtgs", "imps",
+            "neft", "rtgs", "imps", "deposit", "withdraw", "credit",
+            "debit", "saving", "current", "cheque", "check",
+            "remittance", "passbook", "ledger", "statement",
         ])
         
         # Look for account numbers with context

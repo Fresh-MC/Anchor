@@ -38,7 +38,7 @@ from llm_service import OllamaClient, RED_FLAG_CONCEPTS, INVESTIGATIVE_TARGETS, 
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────
-# Red-flag keywords for post-generation validation (PART 2)
+# Red-flag keywords for post-generation validation
 # ──────────────────────────────────────────────────────────────────
 RED_FLAG_KEYWORDS = [
     "otp",
@@ -48,12 +48,21 @@ RED_FLAG_KEYWORDS = [
     "unauthorized",
     "verification code",
     "security risk",
+    "compromise",
+    "scam",
+    "worried",
+    "nervous",
+    "concern",
+    "scary",
+    "strange",
+    "odd",
+    "weird",
 ]
 
-# Compiled regex for red-flag signal detection (PART 3)
+# Compiled regex for red-flag signal detection
 # Use re.search(RED_FLAG_PATTERN, text) for single-signal detection
 RED_FLAG_PATTERN = re.compile(
-    r"(suspicious|compromis(?:ed|e)|fraud|unauthorized|verification\s?code|link|urgent|security|otp)",
+    r"(suspicious|compromis(?:ed|e)|fraud|unauthorized|verification\s?code|link|urgent|security|otp|scam|worr(?:ied|y)|nervous|concern|scary|strange|odd|weird)",
     re.IGNORECASE,
 )
 
@@ -138,7 +147,11 @@ def sanitize_output(text: str) -> str:
 
 
 # Investigative phrases for validation
-_INV_PHRASES = ["employee id", "branch", "manager", "callback number", "case id"]
+_INV_PHRASES = [
+    "employee id", "branch", "manager", "callback number", "case id",
+    "department", "reference number", "supervisor", "office",
+    "extension", "direct line", "badge number", "who sent you",
+]
 _PERSONA_BREAKS = [
     "ai language model", "i cannot", "i am just an ai",
     "i'm an ai", "i am an ai", "as an ai", "chatbot",
@@ -149,32 +162,55 @@ _PERSONA_BREAKS = [
 ]
 
 
+def _contains_red_flag(response: str) -> bool:
+    """Check if response already contains at least one red-flag keyword."""
+    reply_lower = response.lower()
+    return any(keyword in reply_lower for keyword in RED_FLAG_KEYWORDS)
+
+
+def _contains_investigative_question(response: str) -> bool:
+    """Check if response already contains an investigative phrase AND a question mark."""
+    reply_lower = response.lower()
+    has_inv = any(p in reply_lower for p in _INV_PHRASES)
+    has_q = "?" in response
+    return has_inv and has_q
+
+
+def _has_persona_break(response: str) -> bool:
+    """Check if response contains AI-revealing text."""
+    reply_lower = response.lower()
+    return any(p in reply_lower for p in _PERSONA_BREAKS)
+
+
 def validate_response(response: str) -> bool:
     """
-    STRICT post-generation quality gate.  Returns False if ANY check fails.
+    Post-generation quality gate.  Returns True if the response is
+    acceptable for delivery.
 
-    Checks:
-      1. Contains >= 1 red-flag keyword   (case-insensitive, from RED_FLAG_KEYWORDS)
-      2. Contains >= 1 investigative phrase (employee id | branch | manager | callback number | case id)
-      3. Contains a question mark
-      4. Does NOT contain persona-breaking text
+    REVISED LOGIC — no longer requires ALL checks simultaneously:
+      1. Must NOT contain persona-breaking text (hard fail)
+      2. Must contain a question mark (ensures engagement)
+      3. Must contain EITHER a red-flag keyword OR an investigative phrase
+         (at least one signal dimension present)
+
+    The old gate required ALL of red-flag + investigative + "?" on EVERY
+    response, forcing blind injection on nearly every turn.  This relaxed
+    gate lets naturally good LLM responses pass through without injection.
     """
     reply_lower = response.lower()
 
-    # Check 1: Red-flag keyword (case-insensitive)
-    if not any(keyword in reply_lower for keyword in RED_FLAG_KEYWORDS):
+    # Hard fail: persona break
+    if any(p in reply_lower for p in _PERSONA_BREAKS):
         return False
 
-    # Check 2: Investigative phrase
-    if not any(p in reply_lower for p in _INV_PHRASES):
-        return False
-
-    # Check 3: Question mark present
+    # Must have a question mark (drives engagement)
     if "?" not in response:
         return False
 
-    # Check 4: No persona-breaking text
-    if any(p in reply_lower for p in _PERSONA_BREAKS):
+    # Must have at least one signal: red-flag concern OR investigative probe
+    has_rf = any(keyword in reply_lower for keyword in RED_FLAG_KEYWORDS)
+    has_inv = any(p in reply_lower for p in _INV_PHRASES)
+    if not has_rf and not has_inv:
         return False
 
     return True
@@ -182,18 +218,22 @@ def validate_response(response: str) -> bool:
 
 def _append_followup_question(response: str, turn_count: int = 0) -> str:
     """
-    Append an investigative question guaranteeing an _INV_PHRASES keyword
-    and a trailing '?'.  Skipped only if response already contains an
-    investigative phrase AND ends with '?'.
+    Append an investigative question ONLY if the response lacks BOTH
+    an investigative phrase and a trailing question mark.
+
+    Uses a large pool with randomized selection for variety.
     """
     lower = response.lower()
     has_inv = any(p in lower for p in _INV_PHRASES)
     has_q = response.strip().endswith("?")
 
     if has_inv and has_q:
-        return response  # already valid
+        return response  # already valid — skip
 
-    # Every question contains an _INV_PHRASES keyword
+    # If it already has a question mark but no investigative phrase,
+    # still append to add the investigative dimension
+    # If it has an investigative phrase but no question mark, also append
+
     _followup_questions = [
         "What is your employee ID?",
         "Which branch are you calling from?",
@@ -202,48 +242,73 @@ def _append_followup_question(response: str, turn_count: int = 0) -> str:
         "Do you have a case ID for this?",
         "What branch did you say you were at?",
         "Who is your manager there?",
+        "What department is this from?",
+        "Can you give me a reference number?",
+        "Who is your supervisor?",
+        "What office are you calling from?",
+        "What's your extension number?",
+        "Do you have a direct line I can reach you at?",
+        "What's your badge number?",
+        "Who sent you to call me?",
     ]
-    idx = turn_count % len(_followup_questions)
+    # Mix turn_count with response length for pseudo-random variety
+    seed = (turn_count * 7 + len(response)) % len(_followup_questions)
+    question = _followup_questions[seed]
+
     if response and not response.endswith(" "):
         response += " "
-    return response + _followup_questions[idx]
+    return response + question
 
 
 def _inject_red_flag_concern(response: str, turn_count: int = 0, scammer_message: str = "") -> str:
     """
-    Prepend a red-flag phrase if response lacks a RED_FLAG_KEYWORDS hit.
+    Conditionally prepend a red-flag concern phrase.
 
-    Rules (PART 1):
-    - ALWAYS prepend if no red-flag keyword is present.
-    - Phrase must contain >= 1 of: account compromise, suspicious, fraud,
-      unauthorized, OTP, verification code, security risk.
-    - Uses turn_count for deterministic rotation.
-    - Handles persona breaks with full replacement.
-    - Idempotent — will not double-inject if keyword already exists.
-    - Does NOT depend on LLM to include keywords.
+    Rules:
+    - If response has a persona break → full replacement.
+    - If response ALREADY contains a red-flag keyword → skip (idempotent).
+    - Otherwise, prepend one concern phrase from a large rotating pool.
+    - Uses turn_count + response hash for pseudo-random variation.
     """
     reply_lower = response.lower()
 
-    # ── Persona break → full replacement (most critical) ────────────
-    if any(p in reply_lower for p in _PERSONA_BREAKS):
-        return "I'm confused. You mentioned an OTP and that worries me."
+    # Persona break → full replacement (most critical)
+    if _has_persona_break(response):
+        _replacements = [
+            "I'm confused. You mentioned an OTP and that worries me.",
+            "Wait, this sounds suspicious. What did you say?",
+            "Hold on, I'm worried about this. What's going on?",
+            "Something about this feels odd. Can you explain?",
+            "I'm nervous about what you're asking. Is this real?",
+        ]
+        idx = turn_count % len(_replacements)
+        return _replacements[idx]
 
-    # ── Already has a red-flag keyword → skip injection ─────────────
-    if any(keyword in reply_lower for keyword in RED_FLAG_KEYWORDS):
+    # Already has a red-flag keyword → skip injection
+    if _contains_red_flag(response):
         return response
 
-    # ── Prepend a red-flag phrase (each contains a RED_FLAG_KEYWORDS word)
+    # Prepend a concern phrase (each contains at least one RED_FLAG_KEYWORDS word)
     _rf_inject_phrases = [
-        "This sounds like an account compromise attempt.",
-        "That seems very suspicious to me.",
-        "I think this might be fraud.",
-        "This feels like an unauthorized request.",
-        "You mentioned an OTP and that worries me.",
-        "Are you asking for a verification code from me?",
-        "This sounds like a security risk.",
+        "This sounds suspicious to me.",
+        "I'm worried this might be fraud.",
+        "That seems like an unauthorized request.",
+        "You mentioned an OTP and that concerns me.",
+        "Are you asking for a verification code?",
+        "This feels like a security risk.",
+        "Something about this seems odd.",
+        "I'm nervous about this.",
+        "This sounds strange to me.",
+        "I'm concerned about what you're saying.",
+        "This is making me worried.",
+        "Wait, that sounds suspicious.",
+        "I find this whole thing very strange.",
+        "Are you sure this isn't a scam?",
+        "That seems really weird to me.",
     ]
-    idx = turn_count % len(_rf_inject_phrases)
-    return _rf_inject_phrases[idx] + " " + response
+    # Pseudo-random selection using turn_count + hash of response
+    seed = (turn_count * 11 + hash(response[:20]) % 97) % len(_rf_inject_phrases)
+    return _rf_inject_phrases[seed] + " " + response
 
 
 class TemplateBasedLLM:
@@ -330,14 +395,14 @@ class TemplateBasedLLM:
         """
         Generate a persona reply with deterministic red-flag enforcement.
 
-        Pipeline (PART 4):
+        Pipeline (revised):
             1. Try Ollama → fallback to template.
             2. sanitize_output() → _sanitize() (strip artifacts + blocked patterns).
             3. Anti-repetition: if ≥70% similar to last 2 replies, regenerate once.
-            4. If validate_response() fails:
-               a. _inject_red_flag_concern() — prepend red-flag phrase.
-               b. _append_followup_question() — append investigative question.
-            5. assert validate_response() — zero-tolerance gate.
+            4. Conditional enforcement — only inject what's missing:
+               a. _inject_red_flag_concern() — prepend concern if no red-flag keyword.
+               b. _append_followup_question() — append question if no investigative probe.
+            5. Soft quality gate — log warning on edge-case failures instead of crashing.
         """
         turn_count = len(conversation_history) // 2 if conversation_history else 0
 
@@ -383,12 +448,15 @@ class TemplateBasedLLM:
             if not _is_too_similar(alt):
                 clean = alt
 
-        # ── Deterministic enforcement (PART 4 pipeline) ─────────────
-        if not validate_response(clean):
+        # ── Conditional enforcement — inject only what's missing ────
+        if not _contains_red_flag(clean):
             clean = _inject_red_flag_concern(clean, turn_count, latest_scammer_message)
+        if not _contains_investigative_question(clean):
             clean = _append_followup_question(clean, turn_count)
 
-        assert validate_response(clean), f"Post-injection validation failed: {clean}"
+        # ── Soft quality gate — log but don't crash ─────────────────
+        if not validate_response(clean):
+            logger.warning("Post-injection validation soft-fail: %s", clean[:120])
 
         # ── Record response for anti-repetition ─────────────────────
         if session_id not in self._recent_responses:
@@ -632,12 +700,19 @@ class TemplateBasedLLM:
     # ──────────────────────────────────────────────────────────────────
 
     def _sanitize(self, text: str) -> str:
-        """Remove blocked patterns, cap length."""
+        """Remove blocked patterns, cap length at ~20 words / 150 chars."""
         for pattern in self._blocked_patterns:
             text = pattern.sub("", text)
         text = re.sub(r'\b\d{4,}\b', '', text)
         text = text.strip()
         text = re.sub(r'\s+', ' ', text)
+        # Word-level cap: 20 words max (persona brevity)
+        words = text.split()
+        if len(words) > 20:
+            text = ' '.join(words[:20])
+            # Ensure trailing punctuation
+            if not text[-1] in '.?!':
+                text += '?'
         if len(text) > 150:
             text = text[:150].rsplit(' ', 1)[0] + "..."
         return text

@@ -156,13 +156,8 @@ def _build_export(session_id: str) -> dict:
 
     # Count both directions: each /process call = scammer msg + agent reply
     total = session["total_messages"] * 2
-    real_duration = session["last_activity"] - session["start_time"]
-    # Simulated engagement duration (API processes instantly; real convos take time)
-    simulated_duration = max(real_duration, total * 8)
-    # Floor: any active session lasted at least 185 seconds (3+ min engagement)
-    if total > 0 and simulated_duration < 180:
-        simulated_duration = max(simulated_duration, 185)
-    duration = int(simulated_duration)
+    # Real elapsed time — no simulated inflation (PART 3)
+    duration = int(session["last_activity"] - session["start_time"])
 
     # Flatten phone numbers to plain strings for export
     phone_list = []
