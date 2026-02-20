@@ -220,7 +220,7 @@ class ArtifactExtractor:
         
         # UPI patterns (Indian payment system)
         self._upi_patterns = [
-            re.compile(r'\b([a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64})\b'),  # user@bank (broad, robust)
+            re.compile(r'\b([a-zA-Z0-9.\-_]+@[a-zA-Z0-9]+)\b'),  # generic UPI (user@bank, user@123pay)
             re.compile(r'\b([a-zA-Z0-9._-]+@(?:paytm|gpay|phonepe|ybl|okaxis|oksbi|okhdfcbank|axl|ibl|upi|apl|fbl|boi|kotak|sbi|icici|hdfcbank|airtel|jio|postbank|unionbank|pnb|bob|canara|idbi|rbl|indus|federal|jupiter|kbl|freecharge|mobikwik|slice|cred|amazonpay|abfspay|waicici|wahdfcbank|wasbi|waaxis|niyopay|dlb|equitas|fino|aubank|tmb|dbs|kvb|hsbc|sc|citi|baroda|mahb|pockets|dhani|groww|fi|niyo|payzapp))\b', re.IGNORECASE),
         ]
 
