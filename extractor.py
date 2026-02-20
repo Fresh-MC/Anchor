@@ -474,6 +474,47 @@ class ArtifactExtractor:
         upi_ids = set()
         for pattern in self._upi_patterns:
             for match in pattern.finditer(text):
+                # 1. Preview: skip if already claimed by a higher priority
+                if spans.is_overlapping(match.start(), match.end()):
+                    continue
+                    
+                upi_id = match.group(1).lower()
+                
+                # 2. Check for email domains BEFORE claiming the span
+                if '@' in upi_id:
+                    parts = upi_id.split('@')
+                    domain = parts[1] if len(parts) > 1 else ''
+                    
+                    # 3. Only claim if it's NOT a standard email domain
+                    if len(parts[0]) >= 2 and domain not in self._email_domains:
+                        spans.add(match.start(), match.end()) 
+                        upi_ids.add(upi_id)
+        return list(upi_ids)
+        """Extract UPI IDs (excludes known email domains). Claims spans safely."""
+        upi_ids = set()
+        for pattern in self._upi_patterns:
+            for match in pattern.finditer(text):
+                # 1. Preview the span (don't claim it yet!)
+                if spans.is_overlapping(match.start(), match.end()):
+                    continue
+                    
+                upi_id = match.group(1).lower()
+                
+                # 2. Validate UPI format (user@provider)
+                if '@' in upi_id:
+                    parts = upi_id.split('@')
+                    handle = parts[0]
+                    domain = parts[1]
+                    
+                    # 3. If it's valid AND not a known email domain, THEN claim the span
+                    if len(handle) >= 2 and domain not in self._email_domains:
+                        spans.add(match.start(), match.end()) # Claim it now!
+                        upi_ids.add(upi_id)
+        return list(upi_ids)
+        """Extract UPI IDs (excludes known email domains). Claims spans safely."""
+        upi_ids = set()
+        for pattern in self._upi_patterns:
+            for match in pattern.finditer(text):
                 # 1. Preview the span (don't claim it yet!)
                 if spans.is_overlapping(match.start(), match.end()):
                     continue
