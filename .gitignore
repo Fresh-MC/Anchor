@@ -70,3 +70,10 @@ config_local.py
 # Test outputs
 # =========================
 test_outputs/
+
+outputs/
+saved_models/
+onnx_models/
+__pycache__/
+.venv/
+*.mp3
